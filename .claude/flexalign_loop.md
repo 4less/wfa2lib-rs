@@ -32,6 +32,9 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 
 - it6 (v6, taken, 0.987x vs v5, 0.678x vs v0): 32-byte AVX2 compare in extend (long match runs: 150bp 2% 0.95x, 1k 5% 0.95x); hand-vectorised min-distance pass (overlapping last block). Drop case / ends-free neutral.
 
+- it7 (v7, taken, 0.995x vs v6, 0.675x vs v0; memory 5-18x lower): Tight slab sizes wavefronts by need (1.5x rounded to 32, min 64) instead of 1000 elements each.
+  Dropped: gather-based AVX2 extend at count>=8/32 (+20% slower on drop case; gathers lose on short wavefronts).
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

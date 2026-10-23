@@ -168,14 +168,13 @@ impl WavefrontSlab {
                         return Self::set_busy(wf);
                     }
                 }
-                if wf_length <= self.init_wf_length {
-                    match self.free_list.pop() {
-                        Some(wf) => Self::set_busy(wf),
-                        None => self.allocate_new(self.init_wf_length),
+                while let Some(wf) = self.free_list.pop() {
+                    if unsafe { (*wf).wf_elements_allocated } >= wf_length {
+                        return Self::set_busy(wf);
                     }
-                } else {
-                    self.allocate_new(wf_length)
+                    self.retire(wf);
                 }
+                self.allocate_new(Self::tight_alloc_length(wf_length))
             }
         }
     }
@@ -190,9 +189,10 @@ impl WavefrontSlab {
         }
         let wf_length = unsafe { (*wf).wf_elements_allocated };
         // Use >= for Reuse: oversized wavefronts can serve smaller future requests.
+        // Tight: any wavefront can serve a request that fits (checked on pop).
         let repurpose = match self.slab_mode {
             SlabMode::Reuse => wf_length >= self.current_wf_length,
-            SlabMode::Tight => wf_length == self.init_wf_length,
+            SlabMode::Tight => true,
         };
         if repurpose {
             unsafe { (*wf).status = WavefrontStatus::Free };
@@ -289,6 +289,16 @@ impl WavefrontSlab {
     }
 
     // --- Internal ---
+
+    /// Tight mode allocation size for a request of `wf_length` elements:
+    /// 50% headroom (so the next alignment's slightly wider wavefront can
+    /// recycle it), rounded up to 32 elements. Sizing by need instead of a
+    /// fixed 1000 elements keeps memory proportional to the wavefronts and
+    /// avoids placing every array at the same 4 KB page offset.
+    #[inline(always)]
+    fn tight_alloc_length(wf_length: i32) -> i32 {
+        ((wf_length + wf_length / 2 + 31) & !31).max(64)
+    }
 
     #[inline(always)]
     fn set_busy(wf: *mut Wavefront) -> *mut Wavefront {
@@ -447,9 +457,15 @@ mod tests {
     fn test_tight_mode_oversized() {
         let mut slab = WavefrontSlab::new(10, false, SlabMode::Tight);
         let p = slab.allocate_ptr(-10, 10);
-        assert_eq!(unsafe { (*p).wf_elements_allocated }, 21);
+        // Sized by need (with headroom), not by the initial length.
+        let allocated = unsafe { (*p).wf_elements_allocated };
+        assert!((21..=64).contains(&allocated), "allocated={allocated}");
         slab.free_ptr(p);
-        assert_eq!(slab.num_free(), 0); // Deallocated, not free
+        assert_eq!(slab.num_free(), 1); // reusable for anything that fits
+        assert_eq!(slab.allocate_ptr(-10, 10), p);
+        let q = slab.allocate_ptr(-100, 100); // does not fit: new allocation
+        assert_ne!(q, p);
+        assert!(unsafe { (*q).wf_elements_allocated } >= 201);
     }
 
     #[test]

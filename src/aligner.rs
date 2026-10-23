@@ -679,7 +679,7 @@ impl<const N: usize> WavefrontAligner<N> {
         // Allocate or reuse output wavefront
         let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
         let old = if self.wf_components.memory_modular { self.wf_components.get_m_ptr(score_curr) } else { WF_PTR_NONE };
-        let curr_ptr = self.alloc_output(old, eff_lo, eff_hi);
+        let curr_ptr = self.alloc_output(old, eff_lo, eff_hi, lo, hi);
         unsafe { (*curr_ptr).set_limits(lo, hi); }
 
         // Compute kernel
@@ -758,7 +758,7 @@ impl<const N: usize> WavefrontAligner<N> {
         // Allocate or reuse output wavefront
         let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
         let old = if self.wf_components.memory_modular { self.wf_components.get_m_ptr(score_curr) } else { WF_PTR_NONE };
-        let curr_ptr = self.alloc_output(old, eff_lo, eff_hi);
+        let curr_ptr = self.alloc_output(old, eff_lo, eff_hi, lo, hi);
         unsafe { (*curr_ptr).set_limits(lo, hi); }
 
         // Compute kernel using raw pointers for multi-borrow
@@ -873,7 +873,7 @@ impl<const N: usize> WavefrontAligner<N> {
         macro_rules! out_slot_wf {
             ($comp:ident) => {{
                 let old = if modular { self.wf_components.$comp(out_slot) } else { WF_PTR_NONE };
-                self.alloc_output(old, eff_lo, eff_hi)
+                self.alloc_output(old, eff_lo, eff_hi, lo, hi)
             }}
         }
         let m_curr_ptr = crate::phase!(4, out_slot_wf!(get_m_ptr_slot));
@@ -887,10 +887,6 @@ impl<const N: usize> WavefrontAligner<N> {
             let wf_m_open  = if !ptr_m_open.is_null()  { ptr_m_open  as *const _ } else { null_wf };
             let wf_i1_ext  = if !ptr_i1_ext.is_null()  { ptr_i1_ext  as *const _ } else { null_wf };
             let wf_d1_ext  = if !ptr_d1_ext.is_null()  { ptr_d1_ext  as *const _ } else { null_wf };
-
-            (*m_curr_ptr).set_limits(lo, hi);
-            (*i1_curr_ptr).set_limits(lo, hi);
-            (*d1_curr_ptr).set_limits(lo, hi);
 
             crate::phase!(5, affine::compute_affine_idm(
                 plen,
@@ -1029,7 +1025,7 @@ impl<const N: usize> WavefrontAligner<N> {
         macro_rules! out_slot_wf {
             ($comp:ident) => {{
                 let old = if modular { self.wf_components.$comp(out_slot) } else { WF_PTR_NONE };
-                self.alloc_output(old, eff_lo, eff_hi)
+                self.alloc_output(old, eff_lo, eff_hi, lo, hi)
             }}
         }
 
@@ -1763,18 +1759,21 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Output wavefront allocated over [eff_lo, eff_hi]. In modular mode `old` is
     /// the out-of-scope wavefront in the output slot: reuse it if large enough.
     #[inline(always)]
-    fn alloc_output(&mut self, old: *mut Wavefront, eff_lo: i32, eff_hi: i32) -> *mut Wavefront {
+    /// Output wavefront for `[eff_lo, eff_hi]` with limits `[lo, hi]`, which
+    /// the kernel writes in full (only the pads are nulled).
+    #[inline(always)]
+    fn alloc_output(&mut self, old: *mut Wavefront, eff_lo: i32, eff_hi: i32, lo: i32, hi: i32) -> *mut Wavefront {
         if !old.is_null() {
             unsafe {
                 if (*old).wf_elements_allocated >= wavefront_length(eff_lo, eff_hi) {
-                    (*old).init(eff_lo, eff_hi);
+                    (*old).init_output(eff_lo, eff_hi, lo, hi);
                     (*old).status = WavefrontStatus::Busy;
                     return old;
                 }
             }
             self.wavefront_slab.free_ptr(old);
         }
-        self.wavefront_slab.allocate_ptr(eff_lo, eff_hi)
+        self.wavefront_slab.allocate_output_ptr(eff_lo, eff_hi, lo, hi)
     }
 
     /// Clamp compute limits to the band (C's `wavefront_compute_limits_heuristic`).

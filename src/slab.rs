@@ -120,7 +120,25 @@ impl WavefrontSlab {
     /// The returned pointer stays valid until `clear()`/`reap()` (or until the
     /// wavefront is freed and handed out again).
     pub fn allocate_ptr(&mut self, min_lo: i32, max_hi: i32) -> *mut Wavefront {
-        let wf_length = wavefront_length(min_lo, max_hi);
+        let wf = self.allocate_raw(wavefront_length(min_lo, max_hi));
+        unsafe { (*wf).init(min_lo, max_hi) };
+        wf
+    }
+
+    /// Allocate an output wavefront for `[min_lo, max_hi]` whose `[lo, hi]`
+    /// the caller writes in full: only the pads are nulled (see
+    /// `Wavefront::init_output`).
+    #[inline(always)]
+    pub fn allocate_output_ptr(&mut self, min_lo: i32, max_hi: i32, lo: i32, hi: i32) -> *mut Wavefront {
+        let wf = self.allocate_raw(wavefront_length(min_lo, max_hi));
+        unsafe { (*wf).init_output(min_lo, max_hi, lo, hi) };
+        wf
+    }
+
+    /// Hand out a busy wavefront with at least `wf_length` elements; the
+    /// caller initializes it.
+    #[inline(always)]
+    fn allocate_raw(&mut self, wf_length: i32) -> *mut Wavefront {
         match self.slab_mode {
             SlabMode::Reuse => {
                 // Grow current_wf_length if needed
@@ -135,9 +153,9 @@ impl WavefrontSlab {
                         self.retire(wf);
                         continue;
                     }
-                    return Self::init_busy(wf, min_lo, max_hi);
+                    return Self::set_busy(wf);
                 }
-                self.allocate_new(self.current_wf_length, min_lo, max_hi)
+                self.allocate_new(self.current_wf_length)
             }
             SlabMode::Tight => {
                 self.num_handed_out += 1;
@@ -147,16 +165,16 @@ impl WavefrontSlab {
                     let wf = self.wavefronts[self.recycle_next];
                     self.recycle_next += 1;
                     if unsafe { (*wf).wf_elements_allocated } >= wf_length {
-                        return Self::init_busy(wf, min_lo, max_hi);
+                        return Self::set_busy(wf);
                     }
                 }
                 if wf_length <= self.init_wf_length {
                     match self.free_list.pop() {
-                        Some(wf) => Self::init_busy(wf, min_lo, max_hi),
-                        None => self.allocate_new(self.init_wf_length, min_lo, max_hi),
+                        Some(wf) => Self::set_busy(wf),
+                        None => self.allocate_new(self.init_wf_length),
                     }
                 } else {
-                    self.allocate_new(wf_length, min_lo, max_hi)
+                    self.allocate_new(wf_length)
                 }
             }
         }
@@ -273,11 +291,8 @@ impl WavefrontSlab {
     // --- Internal ---
 
     #[inline(always)]
-    fn init_busy(wf: *mut Wavefront, min_lo: i32, max_hi: i32) -> *mut Wavefront {
-        unsafe {
-            (*wf).status = WavefrontStatus::Busy;
-            (*wf).init(min_lo, max_hi);
-        }
+    fn set_busy(wf: *mut Wavefront) -> *mut Wavefront {
+        unsafe { (*wf).status = WavefrontStatus::Busy };
         wf
     }
 
@@ -289,11 +304,10 @@ impl WavefrontSlab {
         self.num_deallocated += 1;
     }
 
-    fn allocate_new(&mut self, wf_length: i32, min_lo: i32, max_hi: i32) -> *mut Wavefront {
+    fn allocate_new(&mut self, wf_length: i32) -> *mut Wavefront {
         let mut wf =
             Wavefront::allocate_from_arena(&mut self.arena, wf_length, self.allocate_backtrace);
         wf.status = WavefrontStatus::Busy;
-        wf.init(min_lo, max_hi);
         self.memory_used += wf.get_size();
         // ByteArena hands out 8-byte aligned memory, enough for Wavefront.
         const _: () = assert!(std::mem::align_of::<Wavefront>() <= 8);

@@ -109,6 +109,35 @@ impl Drop for Wavefront {
     }
 }
 
+/// Set `n` offsets starting at `ptr` to `OFFSET_NULL`.
+///
+/// Wavefront allocations are a few dozen elements, so this is on the hot
+/// path of every compute step: on x86_64 it uses unaligned 256-bit stores
+/// with an overlapping final store instead of a generic fill loop.
+///
+/// # Safety
+/// `ptr` must be valid for writing `n` elements.
+#[inline(always)]
+unsafe fn fill_null(ptr: *mut WfOffset, n: usize) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    unsafe {
+        use std::arch::x86_64::*;
+        if n >= 8 {
+            let v = _mm256_set1_epi32(OFFSET_NULL);
+            let mut i = 0;
+            while i + 8 <= n {
+                _mm256_storeu_si256(ptr.add(i) as *mut __m256i, v);
+                i += 8;
+            }
+            if i < n {
+                _mm256_storeu_si256(ptr.add(n - 8) as *mut __m256i, v);
+            }
+            return;
+        }
+    }
+    unsafe { std::slice::from_raw_parts_mut(ptr, n).fill(OFFSET_NULL) };
+}
+
 impl Wavefront {
     /// Allocate a new wavefront with the given number of elements.
     ///
@@ -302,8 +331,31 @@ impl Wavefront {
         );
         let n = (max_hi - min_lo + 1).max(0) as usize;
         // SAFETY: [min_lo, max_hi] lies within the allocated buffer (asserted above).
+        unsafe { fill_null(self.offsets_ptr, n) };
+    }
+
+    /// Initialize an output wavefront whose `[lo, hi]` the caller writes in
+    /// full before anything reads it: only the pads `[min_lo, lo)` and
+    /// `(hi, max_hi]` are set to `OFFSET_NULL` (see `init`), and the limits
+    /// are set as by `set_limits`.
+    #[inline(always)]
+    pub fn init_output(&mut self, min_lo: i32, max_hi: i32, lo: i32, hi: i32) {
+        debug_assert!(min_lo <= lo && hi <= max_hi && lo <= hi);
+        debug_assert!(max_hi < min_lo + self.wf_elements_allocated);
+        self.null = false;
+        self.lo = lo;
+        self.hi = hi;
+        self.base_k = min_lo;
+        self.centered_offsets = self.offsets_ptr.wrapping_offset(-(min_lo as isize));
+        if !self.bt_pcigar_ptr.is_null() {
+            self.bt_occupancy_max = 0;
+        }
+        self.wf_elements_init_min = lo;
+        self.wf_elements_init_max = hi;
+        // SAFETY: both pads lie within the allocated buffer (asserted above).
         unsafe {
-            std::slice::from_raw_parts_mut(self.offsets_ptr, n).fill(OFFSET_NULL);
+            fill_null(self.offsets_ptr, (lo - min_lo) as usize);
+            fill_null(self.centered_offsets.offset(hi as isize + 1), (max_hi - hi) as usize);
         }
     }
 

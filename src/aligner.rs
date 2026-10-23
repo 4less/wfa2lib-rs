@@ -674,13 +674,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let lo = prev_lo - 1;
         let hi = prev_hi + 1;
 
-        // Initialize ends on previous wavefront (like C's wavefront_compute_init_ends)
-        // Edit kernel reads prev[k-1], prev[k], prev[k+1] for k in [lo, hi]
-        // so prev needs [lo-1, hi+1]
-        unsafe {
-            (*prev_ptr).init_ends_higher(hi + 1);
-            (*prev_ptr).init_ends_lower(lo - 1);
-        }
+        // Inputs read as null outside [lo, hi]: see `Wavefront::init`.
 
         // Allocate or reuse output wavefront
         let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
@@ -759,21 +753,7 @@ impl<const N: usize> WavefrontAligner<N> {
         // Ensure null/victim wavefronts cover the range
         self.wf_components.resize_null_victim(lo, hi);
 
-        // Initialize input wavefront ends (like C's wavefront_compute_init_ends)
-        // misms needs [lo, hi]
-        if !misms_ptr.is_null() {
-            unsafe {
-                (*misms_ptr).init_ends_higher(hi);
-                (*misms_ptr).init_ends_lower(lo);
-            }
-        }
-        // gap needs [lo-1, hi+1] (kernel reads k-1 and k+1)
-        if !gap_ptr.is_null() {
-            unsafe {
-                (*gap_ptr).init_ends_higher(hi + 1);
-                (*gap_ptr).init_ends_lower(lo - 1);
-            }
-        }
+        // Inputs read as null outside [lo, hi]: see `Wavefront::init`.
 
         // Allocate or reuse output wavefront
         let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
@@ -885,13 +865,7 @@ impl<const N: usize> WavefrontAligner<N> {
             prefetch_wf!(ptr_d1_ext, lo);
         }
 
-        // Initialize input wavefront ends using pointers (no slab re-lookup)
-        unsafe {
-            if !ptr_m_misms.is_null() { (*ptr_m_misms).init_ends_higher(hi);     (*ptr_m_misms).init_ends_lower(lo);     }
-            if !ptr_m_open.is_null()  { (*ptr_m_open).init_ends_higher(hi + 1);  (*ptr_m_open).init_ends_lower(lo - 1);  }
-            if !ptr_i1_ext.is_null()  { (*ptr_i1_ext).init_ends_higher(hi);      (*ptr_i1_ext).init_ends_lower(lo - 1);  }
-            if !ptr_d1_ext.is_null()  { (*ptr_d1_ext).init_ends_higher(hi + 1);  (*ptr_d1_ext).init_ends_lower(lo);      }
-        }
+        // Inputs read as null outside [lo, hi]: see `Wavefront::init`.
 
         // Allocate or reuse 3 output wavefronts using pre-computed slot.
         let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
@@ -1047,16 +1021,7 @@ impl<const N: usize> WavefrontAligner<N> {
             prefetch_wf!(ptr_d2_ext, lo);
         }
 
-        // Initialize input wavefront ends using pointers (no slab re-lookup)
-        unsafe {
-            if !ptr_m_misms.is_null() { (*ptr_m_misms).init_ends_higher(hi);     (*ptr_m_misms).init_ends_lower(lo);     }
-            if !ptr_m_open1.is_null() { (*ptr_m_open1).init_ends_higher(hi + 1); (*ptr_m_open1).init_ends_lower(lo - 1); }
-            if !ptr_m_open2.is_null() { (*ptr_m_open2).init_ends_higher(hi + 1); (*ptr_m_open2).init_ends_lower(lo - 1); }
-            if !ptr_i1_ext.is_null()  { (*ptr_i1_ext).init_ends_higher(hi);      (*ptr_i1_ext).init_ends_lower(lo - 1);  }
-            if !ptr_i2_ext.is_null()  { (*ptr_i2_ext).init_ends_higher(hi);      (*ptr_i2_ext).init_ends_lower(lo - 1);  }
-            if !ptr_d1_ext.is_null()  { (*ptr_d1_ext).init_ends_higher(hi + 1);  (*ptr_d1_ext).init_ends_lower(lo);      }
-            if !ptr_d2_ext.is_null()  { (*ptr_d2_ext).init_ends_higher(hi + 1);  (*ptr_d2_ext).init_ends_lower(lo);      }
-        }
+        // Inputs read as null outside [lo, hi]: see `Wavefront::init`.
 
         // Allocate or reuse output wavefronts using pre-computed slot.
         let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);

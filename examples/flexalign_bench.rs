@@ -308,4 +308,5 @@ fn main() {
         }
         bench(name, cases, reps);
     }
+    wfa2lib_rs::prof::report();
 }

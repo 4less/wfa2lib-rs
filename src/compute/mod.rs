@@ -5,7 +5,7 @@ pub mod affine2p;
 pub mod edit;
 pub mod linear;
 
-use crate::offset::{wavefront_h, wavefront_v};
+use crate::offset::{OFFSET_NULL, wavefront_h, wavefront_v};
 use crate::wavefront::Wavefront;
 
 /// Trim wavefront ends: remove diagonals where the offset is out of bounds.
@@ -13,6 +13,10 @@ use crate::wavefront::Wavefront;
 pub fn trim_ends(pattern_length: i32, text_length: i32, wf: &mut Wavefront) {
     // Use pre-centered pointer for direct k-indexed access
     let centered = unsafe { wf.offsets_centered_mut_ptr() };
+
+    // Trimmed diagonals are set to OFFSET_NULL so later steps can read
+    // [lo-1, hi+1] of this wavefront without `init_ends_*` fills (see
+    // `Wavefront::init`).
 
     // Trim from hi
     let lo = wf.lo;
@@ -24,6 +28,7 @@ pub fn trim_ends(pattern_length: i32, text_length: i32, wf: &mut Wavefront) {
         if h <= text_length as u32 && v <= pattern_length as u32 {
             break;
         }
+        unsafe { *centered.offset(k as isize) = OFFSET_NULL };
         k -= 1;
     }
     wf.hi = k;
@@ -39,6 +44,7 @@ pub fn trim_ends(pattern_length: i32, text_length: i32, wf: &mut Wavefront) {
         if h <= text_length as u32 && v <= pattern_length as u32 {
             break;
         }
+        unsafe { *centered.offset(k as isize) = OFFSET_NULL };
         k += 1;
     }
     wf.lo = k;
@@ -50,7 +56,6 @@ pub fn trim_ends(pattern_length: i32, text_length: i32, wf: &mut Wavefront) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::offset::OFFSET_NULL;
 
     #[test]
     fn test_trim_ends_no_trim() {

@@ -275,6 +275,12 @@ impl Wavefront {
     /// Initialize the wavefront for a new alignment step.
     /// Sets base_k = min_lo (matching C's `offsets = offsets_mem - min_lo`).
     /// Accessible range is [min_lo, min_lo + wf_elements_allocated - 1].
+    ///
+    /// Every offset in `[min_lo, max_hi]` is set to `OFFSET_NULL`. Together with
+    /// `trim_ends` nulling what it trims, this keeps the invariant that offsets
+    /// outside `[lo, hi]` (other than diagonals a heuristic pruned, which keep
+    /// their value as in C) read as null, so compute steps need no
+    /// `init_ends_*` fills before reading `[lo-1, hi+1]` of their inputs.
     pub fn init(&mut self, min_lo: i32, max_hi: i32) {
         self.null = false;
         self.lo = 1;
@@ -294,6 +300,11 @@ impl Wavefront {
             self.base_k,
             self.wf_elements_allocated
         );
+        let n = (max_hi - min_lo + 1).max(0) as usize;
+        // SAFETY: [min_lo, max_hi] lies within the allocated buffer (asserted above).
+        unsafe {
+            std::slice::from_raw_parts_mut(self.offsets_ptr, n).fill(OFFSET_NULL);
+        }
     }
 
     /// Initialize as a null wavefront (all offsets set to OFFSET_NULL).

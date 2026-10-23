@@ -10,7 +10,7 @@
 //! mismatches, terminating extension).
 
 /// Padding bytes around sequences for safe over-read in extend kernel.
-const WF_SEQUENCES_PADDING: usize = 64;
+pub(crate) const WF_SEQUENCES_PADDING: usize = 64;
 
 /// Sentinel character at end of pattern (must differ from any text character).
 const WF_SEQUENCES_PATTERN_EOS: u8 = b'!';

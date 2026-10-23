@@ -194,20 +194,7 @@ fn wfadaptive_cutoff(
 
     // Minimum distance over all diagonals.
     // distance(k) = max(plen - v, tlen - h) = max(plen + k, tlen) - offset.
-    let min_distance = {
-        let n = (base_hi - base_lo + 1) as usize;
-        // SAFETY: [lo, hi] is within the wavefront's allocated range.
-        let offs = unsafe { std::slice::from_raw_parts(wf.offsets_centered_ptr().offset(base_lo as isize), n) };
-        let mut min_distance = pattern_length.max(text_length);
-        let mut k = base_lo;
-        for &offset in offs {
-            let d = (pattern_length + k).max(text_length).wrapping_sub(offset);
-            let d = if offset < 0 { i32::MAX } else { d };
-            min_distance = min_distance.min(d);
-            k += 1;
-        }
-        min_distance
-    };
+    let min_distance = unsafe { min_distance_end2end(wf, pattern_length, text_length) };
 
     // Reduce: preserve target diagonal
     let alignment_k = text_length - pattern_length;
@@ -223,6 +210,63 @@ fn wfadaptive_cutoff(
 
     // Reset wait steps
     state.steps_wait = steps_between_cutoffs;
+}
+
+/// Minimum end-to-end distance over the wavefront's diagonals [lo, hi]
+/// (at least `max(plen, tlen)` as an upper bound):
+/// distance(k) = max(plen - v, tlen - h) = max(plen + k, tlen) - offset,
+/// null offsets excluded.
+///
+/// # Safety
+/// `wf.lo..=wf.hi` must be within the wavefront's allocated range.
+#[inline(always)]
+unsafe fn min_distance_end2end(wf: &Wavefront, pattern_length: i32, text_length: i32) -> i32 {
+    let (lo, hi) = (wf.lo, wf.hi);
+    let count = hi - lo + 1;
+    let offsets = unsafe { wf.offsets_centered_ptr() };
+    let bound = pattern_length.max(text_length);
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    if count >= 8 {
+        use std::arch::x86_64::*;
+        unsafe {
+            let v_tlen = _mm256_set1_epi32(text_length);
+            let lanes = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+            let v_zero = _mm256_setzero_si256();
+            let v_max = _mm256_set1_epi32(i32::MAX);
+            let mut v_min = _mm256_set1_epi32(bound);
+            let mut block = |k: i32| {
+                let v_off = _mm256_loadu_si256(offsets.offset(k as isize) as *const __m256i);
+                let v_pk = _mm256_add_epi32(_mm256_set1_epi32(pattern_length + k), lanes);
+                let d = _mm256_sub_epi32(_mm256_max_epi32(v_pk, v_tlen), v_off);
+                let null = _mm256_cmpgt_epi32(v_zero, v_off); // offset < 0
+                v_min = _mm256_min_epi32(v_min, _mm256_blendv_epi8(d, v_max, null));
+            };
+            let mut k = lo;
+            let end = lo + (count & !7);
+            while k < end {
+                block(k);
+                k += 8;
+            }
+            if k <= hi {
+                block(hi - 7); // overlapping final block
+            }
+            // Horizontal min
+            let lo128 = _mm256_castsi256_si128(v_min);
+            let hi128 = _mm256_extracti128_si256(v_min, 1);
+            let m = _mm_min_epi32(lo128, hi128);
+            let m = _mm_min_epi32(m, _mm_shuffle_epi32(m, 0b01_00_11_10));
+            let m = _mm_min_epi32(m, _mm_shuffle_epi32(m, 0b10_11_00_01));
+            return _mm_cvtsi128_si32(m);
+        }
+    }
+    let mut min_distance = bound;
+    for k in lo..=hi {
+        let offset = unsafe { *offsets.offset(k as isize) };
+        let d = (pattern_length + k).max(text_length).wrapping_sub(offset);
+        let d = if offset < 0 { i32::MAX } else { d };
+        min_distance = min_distance.min(d);
+    }
+    min_distance
 }
 
 /// Reduce wavefront bounds by removing diagonals far from minimum distance.

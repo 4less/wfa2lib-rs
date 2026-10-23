@@ -11,6 +11,10 @@ use crate::termination;
 use crate::wavefront::Wavefront;
 
 /// Scalar extend kernel for a single diagonal. Used as fallback from AVX2.
+///
+/// Compares 32 characters per step with AVX2 (the sequence buffers carry
+/// `WF_SEQUENCES_PADDING` bytes past each sentinel, so the over-read past
+/// the first mismatch stays in bounds), 8 otherwise.
 #[inline(always)]
 unsafe fn extend_scalar_one(
     pattern_base: *const u8,
@@ -23,17 +27,36 @@ unsafe fn extend_scalar_one(
         let h = offset as usize;
         let mut p_ptr = pattern_base.add(v);
         let mut t_ptr = text_base.add(h);
-        let mut cmp = (p_ptr as *const u64).read_unaligned()
-            ^ (t_ptr as *const u64).read_unaligned();
-        while cmp == 0 {
-            offset += 8;
-            p_ptr = p_ptr.add(8);
-            t_ptr = t_ptr.add(8);
-            cmp = (p_ptr as *const u64).read_unaligned()
-                ^ (t_ptr as *const u64).read_unaligned();
+        #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+        {
+            use std::arch::x86_64::*;
+            const _: () = assert!(crate::sequences::WF_SEQUENCES_PADDING >= 32);
+            loop {
+                let p = _mm256_loadu_si256(p_ptr as *const __m256i);
+                let t = _mm256_loadu_si256(t_ptr as *const __m256i);
+                let eq = _mm256_movemask_epi8(_mm256_cmpeq_epi8(p, t)) as u32;
+                if eq != u32::MAX {
+                    return offset + (!eq).trailing_zeros() as i32;
+                }
+                offset += 32;
+                p_ptr = p_ptr.add(32);
+                t_ptr = t_ptr.add(32);
+            }
         }
-        offset += (cmp.trailing_zeros() / 8) as i32;
-        offset
+        #[cfg(not(all(target_arch = "x86_64", target_feature = "avx2")))]
+        {
+            let mut cmp = (p_ptr as *const u64).read_unaligned()
+                ^ (t_ptr as *const u64).read_unaligned();
+            while cmp == 0 {
+                offset += 8;
+                p_ptr = p_ptr.add(8);
+                t_ptr = t_ptr.add(8);
+                cmp = (p_ptr as *const u64).read_unaligned()
+                    ^ (t_ptr as *const u64).read_unaligned();
+            }
+            offset += (cmp.trailing_zeros() / 8) as i32;
+            offset
+        }
     }
 }
 
@@ -428,18 +451,7 @@ pub fn extend_matches_packed_endsfree(
     unsafe {
         let centered = wf.offsets_centered_mut_ptr();
         // Extend diagonal k from `offset` (>= 0); returns the new offset.
-        let extend = |k: i32, mut offset: WfOffset| -> WfOffset {
-            let mut p_ptr = pattern_base.add((offset - k) as usize);
-            let mut t_ptr = text_base.add(offset as usize);
-            let mut cmp = (p_ptr as *const u64).read_unaligned() ^ (t_ptr as *const u64).read_unaligned();
-            while cmp == 0 {
-                offset += 8;
-                p_ptr = p_ptr.add(8);
-                t_ptr = t_ptr.add(8);
-                cmp = (p_ptr as *const u64).read_unaligned() ^ (t_ptr as *const u64).read_unaligned();
-            }
-            offset + (cmp.trailing_zeros() / 8) as i32
-        };
+        let extend = |k: i32, offset: WfOffset| -> WfOffset { extend_scalar_one(pattern_base, text_base, k, offset) };
 
         if !cfg!(target_feature = "avx2") {
             for k in lo..=hi {

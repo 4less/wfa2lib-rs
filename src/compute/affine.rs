@@ -23,7 +23,7 @@ use crate::wavefront::Wavefront;
 /// - `wf_m_curr`: M-wavefront at current score
 /// - `wf_i1_curr`: I1-wavefront at current score
 /// - `wf_d1_curr`: D1-wavefront at current score
-#[inline]
+#[inline(always)]
 #[allow(clippy::too_many_arguments)]
 pub fn compute_affine_idm(
     pattern_length: i32,
@@ -219,8 +219,8 @@ unsafe fn compute_affine_idm_neon(
 /// OFFSET_NULL afterwards, provided the outputs have 8 slots of pad past
 /// `hi` (`tail_room`); otherwise it falls back to scalar.
 #[cfg(target_arch = "x86_64")]
-#[inline]
-#[target_feature(enable = "avx2")]
+#[cfg_attr(target_feature = "avx2", inline(always))]
+#[cfg_attr(not(target_feature = "avx2"), inline, target_feature(enable = "avx2"))]
 #[allow(clippy::too_many_arguments, unsafe_op_in_unsafe_fn)]
 unsafe fn compute_affine_idm_avx2(
     pattern_length: i32,

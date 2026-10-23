@@ -39,6 +39,8 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
   Dropped: running min-distance in extend (+7%/+14% slower). Note: ends-free wavefronts average ~43 diagonals (begin-free span) vs ~9 for e2e; inherent (C does the same).
   Vector trim keeps losing: likely store-forwarding stalls (32B loads spanning several of the kernel's 32B stores); kernel-mask-based trim judged not worth it.
 
+- it9 (v9, taken, 0.989x vs v8, 0.657x vs v0): affine kernel inline(always) under compile-time AVX2 (cfg_attr; inline(always)+target_feature is rejected by rustc).
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

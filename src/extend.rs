@@ -472,8 +472,11 @@ pub fn extend_matches_packed_endsfree(
         if num_diagonals < 8 {
             return None;
         }
-        let k_min = lo + peel;
-        let mut chunk = k_min;
+        // Lanes whose first 4 characters matched terminate right away (in
+        // chunk order); otherwise the lowest terminating diagonal of the
+        // chunked range wins, as C's final lo-to-hi pass would find it.
+        let mut pending: Option<(i32, WfOffset)> = None;
+        let mut chunk = lo + peel;
         while chunk <= hi {
             for k in chunk..chunk + 8 {
                 let offset = *centered.offset(k as isize);
@@ -483,22 +486,19 @@ pub fn extend_matches_packed_endsfree(
                 }
                 let extended = extend(k, offset);
                 *centered.offset(k as isize) = extended;
-                // Lanes whose first 4 characters matched are checked right away
-                if extended - offset >= 4 && done(k, extended) {
-                    return Some((k, extended));
+                if done(k, extended) {
+                    if extended - offset >= 4 {
+                        return Some((k, extended));
+                    }
+                    if pending.is_none() {
+                        pending = Some((k, extended));
+                    }
                 }
             }
             chunk += 8;
         }
-        for k in k_min..=hi {
-            let offset = *centered.offset(k as isize);
-            if offset >= 0 && done(k, offset) {
-                return Some((k, offset));
-            }
-        }
+        pending
     }
-
-    None
 }
 
 // --- Custom extend functions for Lambda mode (bounds-checked, no sentinels) ---

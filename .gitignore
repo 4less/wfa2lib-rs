@@ -26,3 +26,4 @@ WFA2-lib
 
 /target
 bench/data/
+tests/diff_data/

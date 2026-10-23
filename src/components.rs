@@ -213,6 +213,20 @@ impl<const N: usize> WavefrontComponents<N> {
         }
     }
 
+    /// Allocation limits for an output wavefront covering [lo, hi]
+    /// (C's `wavefront_compute_limits_output`): pad by `max_score_scope + 1` so
+    /// later steps can read k±1 without peeling, and never shrink below the
+    /// historic limits (heuristics can move lo/hi back out).
+    #[inline(always)]
+    pub fn compute_limits_output(&mut self, lo: i32, hi: i32) -> (i32, i32) {
+        let pad = self.max_score_scope as i32 + 1;
+        let eff_lo = (lo - pad).min(self.historic_min_lo);
+        let eff_hi = (hi + pad).max(self.historic_max_hi);
+        self.historic_min_lo = eff_lo;
+        self.historic_max_hi = eff_hi;
+        (eff_lo, eff_hi)
+    }
+
     // --- Accessor helpers ---
 
     #[inline(always)]

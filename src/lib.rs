@@ -10,6 +10,8 @@ pub mod extend;
 pub mod heuristic;
 pub mod offset;
 pub mod pcigar;
+#[doc(hidden)]
+pub mod prof;
 pub mod penalties;
 pub mod sequences;
 pub mod slab;

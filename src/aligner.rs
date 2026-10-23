@@ -1,20 +1,23 @@
 //! WavefrontAligner: main state machine and public API for wavefront alignment.
 
 use crate::backtrace;
-use crate::bialign::{self, BIALIGN_FALLBACK_MIN_SCORE, BiAlignBreakpoint, ComponentType};
+use crate::bialign::{
+    self, BIALIGN_FALLBACK_MIN_LENGTH, BIALIGN_FALLBACK_MIN_SCORE, BIALIGN_RECOVERY_MIN_SCORE,
+    BiAlignBreakpoint, ComponentType,
+};
 use crate::cigar::Cigar;
 use crate::components::WavefrontComponents;
 use crate::compute;
 use crate::compute::{affine, affine2p, edit, linear};
 use crate::extend;
-use crate::heuristic::{self, HeuristicState, HeuristicStrategy};
-use crate::offset::{wavefront_h, wavefront_v};
+use crate::heuristic::{self, Cutoff, HeuristicState, HeuristicStrategy};
+use crate::offset::{OFFSET_NULL, wavefront_h, wavefront_length, wavefront_v};
 use crate::penalties::{DistanceMetric, WavefrontPenalties};
 use crate::sequences::{SequenceMode, WavefrontSequences};
 use crate::components::WF_PTR_NONE;
 use crate::slab::{SlabMode, WavefrontSlab};
 use crate::termination;
-use crate::wavefront::{WavefrontPos, WavefrontStatus};
+use crate::wavefront::{Wavefront, WavefrontPos, WavefrontStatus};
 
 /// Alignment computation scope.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +54,32 @@ pub enum AlignStatus {
     Completed,
     /// Partial alignment (extension or heuristic).
     Partial,
+    /// No alignment found under the configured heuristics (BiWFA).
+    Unattainable,
+}
+
+/// Inputs shared by every level of a BiWFA alignment.
+struct BiContext<'a> {
+    penalties: &'a WavefrontPenalties,
+    heuristic: &'a HeuristicStrategy,
+    max_steps: i32,
+    pattern: &'a [u8],
+    text: &'a [u8],
+}
+
+/// `heuristic` with its band (static or adaptive) mapped by `f(min_k, max_k)`.
+fn shift_band(heuristic: &HeuristicStrategy, f: impl Fn(i32, i32) -> (i32, i32)) -> HeuristicStrategy {
+    match *heuristic {
+        HeuristicStrategy::BandedStatic { min_k, max_k } => {
+            let (min_k, max_k) = f(min_k, max_k);
+            HeuristicStrategy::BandedStatic { min_k, max_k }
+        }
+        HeuristicStrategy::BandedAdaptive { min_k, max_k, steps_between_cutoffs } => {
+            let (min_k, max_k) = f(min_k, max_k);
+            HeuristicStrategy::BandedAdaptive { min_k, max_k, steps_between_cutoffs }
+        }
+        ref other => other.clone(),
+    }
 }
 
 /// Main wavefront aligner.
@@ -112,7 +141,7 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Create a new aligner with the given penalties.
     pub fn new(penalties: WavefrontPenalties) -> Self {
         let wf_components = WavefrontComponents::<N>::new(10, 10, &penalties, false, false);
-        let init_wf_length = 10;
+        let init_wf_length = 1000; // as C's wavefront_aligner_init_mm
 
         Self {
             sequences: WavefrontSequences::new(),
@@ -205,13 +234,13 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Shared end-to-end alignment loop (sequences must already be initialized).
     fn align_end2end_inner(&mut self) -> i32 {
         // Init alignment
-        self.init_alignment();
+        crate::phase!(0, self.init_alignment());
 
         // Main alignment loop
         let mut score = 0;
         loop {
             // Extend
-            if self.extend_end2end(score) {
+            if crate::phase!(1, self.extend_end2end(score)) {
                 break;
             }
 
@@ -219,7 +248,7 @@ impl<const N: usize> WavefrontAligner<N> {
             score += 1;
 
             // Compute next wavefront based on distance metric
-            self.compute_step(score);
+            crate::phase!(2, self.compute_step(score));
 
             // Check limits
             if score >= self.max_alignment_steps {
@@ -231,60 +260,7 @@ impl<const N: usize> WavefrontAligner<N> {
         // Record how many flat slots were used (for efficient clear on next alignment).
         self.wf_components.prev_score_count = (score + 1) as usize;
 
-        // Finalize
-        if self.status == AlignStatus::EndReached {
-            // Backtrace to produce CIGAR if requested
-            if self.alignment_scope == AlignmentScope::ComputeAlignment {
-                let pos = self.alignment_end_pos;
-                match self.penalties.distance_metric {
-                    DistanceMetric::GapAffine => {
-                        backtrace::backtrace_affine(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            ComponentType::M,
-                            ComponentType::M,
-                            &mut self.cigar,
-                        );
-                    }
-                    DistanceMetric::GapAffine2p => {
-                        backtrace::backtrace_affine2p(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            ComponentType::M,
-                            ComponentType::M,
-                            &mut self.cigar,
-                        );
-                    }
-                    _ => {
-                        backtrace::backtrace_linear(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            &mut self.cigar,
-                        );
-                    }
-                }
-            }
-            self.status = AlignStatus::Completed;
-        }
-
+        crate::phase!(7, self.terminate());
         score
     }
 
@@ -301,6 +277,8 @@ impl<const N: usize> WavefrontAligner<N> {
 
         // For extension mode, override end_free to full sequence lengths
         if self.extension {
+            self.pattern_begin_free = 0;
+            self.text_begin_free = 0;
             self.pattern_end_free = self.sequences.pattern_length;
             self.text_end_free = self.sequences.text_length;
         }
@@ -345,81 +323,7 @@ impl<const N: usize> WavefrontAligner<N> {
         // Record how many flat slots were used (for efficient clear on next alignment).
         self.wf_components.prev_score_count = (score + 1) as usize;
 
-        // Finalize
-        if self.status == AlignStatus::EndReached || self.status == AlignStatus::EndUnreachable {
-            let unreachable = self.status == AlignStatus::EndUnreachable;
-
-            // Backtrace to produce CIGAR if requested
-            if self.alignment_scope == AlignmentScope::ComputeAlignment
-                && self.status == AlignStatus::EndReached
-            {
-                let pos = self.alignment_end_pos;
-                match self.penalties.distance_metric {
-                    DistanceMetric::GapAffine => {
-                        backtrace::backtrace_affine(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            ComponentType::M,
-                            ComponentType::M,
-                            &mut self.cigar,
-                        );
-                    }
-                    DistanceMetric::GapAffine2p => {
-                        backtrace::backtrace_affine2p(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            ComponentType::M,
-                            ComponentType::M,
-                            &mut self.cigar,
-                        );
-                    }
-                    _ => {
-                        backtrace::backtrace_linear(
-                            &self.wf_components,
-                            &self.wavefront_slab,
-                            &self.penalties,
-                            self.sequences.pattern_length,
-                            self.sequences.text_length,
-                            pos.score,
-                            pos.k,
-                            pos.offset,
-                            &mut self.cigar,
-                        );
-                    }
-                }
-
-                // Post-processing: extension mode or unreachable → maxtrim
-                if self.extension || unreachable {
-                    let trimmed = self.maxtrim_cigar();
-                    self.status = if trimmed || unreachable {
-                        AlignStatus::Partial
-                    } else {
-                        AlignStatus::Completed
-                    };
-                } else {
-                    self.status = AlignStatus::Completed;
-                }
-            } else {
-                self.status = if unreachable {
-                    AlignStatus::Partial
-                } else {
-                    AlignStatus::Completed
-                };
-            }
-        }
-
+        self.terminate();
         score
     }
 
@@ -455,14 +359,10 @@ impl<const N: usize> WavefrontAligner<N> {
         // Resize components for sequence dimensions
         self.wf_components.resize(plen, tlen, &self.penalties);
 
-        // CIGAR (non-modular): reap wavefronts to free list without arena reset —
-        // offset arrays are reused in-place next alignment (zero-alloc steady state).
-        // Score-only (modular): full clear; circular window already handles reuse.
-        if score_only {
-            self.wavefront_slab.clear();
-        } else {
-            self.wavefront_slab.reap_cigar();
-        }
+        // Slab mode as in C: modular (score-only) reuses wavefronts of a common
+        // length; CIGAR mode keeps every wavefront, sized to its own range.
+        self.wavefront_slab.set_mode(if score_only { SlabMode::Reuse } else { SlabMode::Tight });
+        if score_only { self.wavefront_slab.clear(); } else { self.wavefront_slab.recycle(); }
 
         // Pre-size slab to avoid Vec reallocations that would invalidate stored *mut Wavefront ptrs.
         // In CIGAR mode: reserve for all wavefronts across all scores.
@@ -486,31 +386,30 @@ impl<const N: usize> WavefrontAligner<N> {
         // Reset state
         self.num_null_steps = 0;
         self.status = AlignStatus::Ok;
-        self.alignment_end_pos = WavefrontPos::default();
+        self.alignment_end_pos = WavefrontPos { score: -1, k: i32::MAX, offset: OFFSET_NULL };
         self.heuristic_state.reset(&self.heuristic);
 
-        // Compute allocation limits based on sequence lengths.
-        // k ranges from -plen to +tlen, so we need wavefronts that cover this
-        // full range. Add padding for the kernel's k±1 reads and score scope.
-        let max_score_scope = self.wf_components.max_score_scope as i32;
-        let eff_lo = -(plen + max_score_scope + 2);
-        let eff_hi = tlen + max_score_scope + 2;
-
-        // Update historic bounds — these define the min base_k for all wavefronts
-        self.wf_components.historic_min_lo = eff_lo;
-        self.wf_components.historic_max_hi = eff_hi;
-
-        // Ensure the slab allocates wavefronts large enough for the full range
-        self.wavefront_slab.ensure_min_length(eff_lo, eff_hi);
-
-        // Resize null/victim wavefronts
-        self.wf_components.resize_null_victim(eff_lo, eff_hi);
-
-        // Allocate initial M-wavefront at score 0
+        // Initial M-wavefront at score 0 (C's wavefront_aligner_init_wf_m).
+        // Ends-free with match=0: begin-free diagonals start at score 0.
+        let begin_free = self.penalties.match_ == 0 && self.alignment_span == AlignmentSpan::EndsFree;
+        let (text_begin_free, pattern_begin_free) =
+            if begin_free { (self.text_begin_free, self.pattern_begin_free) } else { (0, 0) };
+        let (lo, hi) = (-pattern_begin_free, text_begin_free);
+        self.wf_components.historic_min_lo = 0;
+        self.wf_components.historic_max_hi = 0;
+        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
         let wf_ptr = self.wavefront_slab.allocate_ptr(eff_lo, eff_hi);
         unsafe {
             (*wf_ptr).set_offset(0, 0);
-            (*wf_ptr).set_limits(0, 0);
+            // Text begin-free: (h,0) on diagonal k=h with offset h
+            for h in 1..=text_begin_free {
+                (*wf_ptr).set_offset(h, h);
+            }
+            // Pattern begin-free: (0,v) on diagonal k=-v with offset 0
+            for v in 1..=pattern_begin_free {
+                (*wf_ptr).set_offset(-v, 0);
+            }
+            (*wf_ptr).set_limits(lo, hi);
         }
         self.wf_components.set_m_ptr(0, wf_ptr);
     }
@@ -616,6 +515,45 @@ impl<const N: usize> WavefrontAligner<N> {
         false
     }
 
+    /// Finish an alignment that ended (C's `wavefront_unialign_terminate`):
+    /// backtrace from `alignment_end_pos` (the end, or the best position when a
+    /// heuristic dropped the alignment), then trim for extension/unreachable ends.
+    fn terminate(&mut self) {
+        if self.status != AlignStatus::EndReached && self.status != AlignStatus::EndUnreachable {
+            return;
+        }
+        let unreachable = self.status == AlignStatus::EndUnreachable;
+        if self.alignment_scope == AlignmentScope::ComputeScore {
+            self.status = if unreachable { AlignStatus::Partial } else { AlignStatus::Completed };
+            return;
+        }
+        let pos = self.alignment_end_pos;
+        if pos.offset != OFFSET_NULL {
+            let plen = self.sequences.pattern_length;
+            let tlen = self.sequences.text_length;
+            match self.penalties.distance_metric {
+                DistanceMetric::GapAffine => backtrace::backtrace_affine(
+                    &self.wf_components, &self.wavefront_slab, &self.penalties, plen, tlen,
+                    pos.score, pos.k, pos.offset, ComponentType::M, ComponentType::M, &mut self.cigar,
+                ),
+                DistanceMetric::GapAffine2p => backtrace::backtrace_affine2p(
+                    &self.wf_components, &self.wavefront_slab, &self.penalties, plen, tlen,
+                    pos.score, pos.k, pos.offset, ComponentType::M, ComponentType::M, &mut self.cigar,
+                ),
+                _ => backtrace::backtrace_linear(
+                    &self.wf_components, &self.wavefront_slab, &self.penalties, plen, tlen,
+                    pos.score, pos.k, pos.offset, &mut self.cigar,
+                ),
+            }
+        }
+        self.status = if self.extension || unreachable {
+            let trimmed = self.maxtrim_cigar();
+            if trimmed || unreachable { AlignStatus::Partial } else { AlignStatus::Completed }
+        } else {
+            AlignStatus::Completed
+        };
+    }
+
     /// Apply maxtrim to the CIGAR based on the distance metric.
     /// Returns true if the CIGAR was trimmed.
     fn maxtrim_cigar(&mut self) -> bool {
@@ -642,24 +580,37 @@ impl<const N: usize> WavefrontAligner<N> {
         let plen = self.sequences.pattern_length;
         let tlen = self.sequences.text_length;
 
-        // Use the victim wavefront's offsets as scratch buffer for distances
-        let distances_base_k = self.wf_components.wavefront_victim.base_k();
-        let distances = self.wf_components.wavefront_victim.offsets_slice_mut();
+        // Use the victim wavefront's offsets as scratch buffer (covering [lo-1, hi+1])
+        let (m_lo, m_hi) = unsafe { ((*m_ptr).lo, (*m_ptr).hi) };
+        self.wf_components.resize_null_victim(m_lo, m_hi);
+        let buffer_base_k = self.wf_components.wavefront_victim.base_k();
+        let buffer = self.wf_components.wavefront_victim.offsets_slice_mut();
+        let swg_match = if self.penalties.match_ != 0 { -self.penalties.match_ } else { -1 };
 
         let wf = unsafe { &mut *m_ptr };
-        let zdropped = heuristic::heuristic_cutoff(
+        match heuristic::heuristic_cutoff(
             &self.heuristic,
             &mut self.heuristic_state,
             wf,
-            distances,
-            distances_base_k,
+            buffer,
+            buffer_base_k,
             plen,
             tlen,
             score,
-        );
-
-        if zdropped {
-            return true;
+            swg_match,
+        ) {
+            Cutoff::None => return false,
+            Cutoff::ZDropped => {
+                // Alignment ends at the best position seen
+                let st = &self.heuristic_state;
+                self.alignment_end_pos = WavefrontPos {
+                    score: st.max_wf_score,
+                    k: st.max_sw_score_k,
+                    offset: st.max_sw_score_offset,
+                };
+                return true;
+            }
+            Cutoff::Pruned => {}
         }
 
         // Propagate narrowed M-wavefront bounds to I/D wavefronts
@@ -732,19 +683,9 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         // Allocate or reuse output wavefront
-        let hist_lo = self.wf_components.historic_min_lo;
-        let hist_hi = self.wf_components.historic_max_hi;
-        let curr_ptr = if self.wf_components.memory_modular {
-            let old = self.wf_components.get_m_ptr(score_curr);
-            if !old.is_null() {
-                unsafe { (*old).init(hist_lo, hist_hi); (*old).status = WavefrontStatus::Busy; }
-                old
-            } else {
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-            }
-        } else {
-            self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-        };
+        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
+        let old = if self.wf_components.memory_modular { self.wf_components.get_m_ptr(score_curr) } else { WF_PTR_NONE };
+        let curr_ptr = self.alloc_output(old, eff_lo, eff_hi);
         unsafe { (*curr_ptr).set_limits(lo, hi); }
 
         // Compute kernel
@@ -808,8 +749,7 @@ impl<const N: usize> WavefrontAligner<N> {
         };
 
         // Union of ranges (gap expands by ±1 for ins/del k-shifts)
-        let lo = misms_lo.min(gap_lo - 1);
-        let hi = misms_hi.max(gap_hi + 1);
+        let (lo, hi) = self.clamp_limits_heuristic(misms_lo.min(gap_lo - 1), misms_hi.max(gap_hi + 1));
 
         if lo > hi {
             // No valid inputs
@@ -836,19 +776,9 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         // Allocate or reuse output wavefront
-        let hist_lo = self.wf_components.historic_min_lo;
-        let hist_hi = self.wf_components.historic_max_hi;
-        let curr_ptr = if self.wf_components.memory_modular {
-            let old = self.wf_components.get_m_ptr(score_curr);
-            if !old.is_null() {
-                unsafe { (*old).init(hist_lo, hist_hi); (*old).status = WavefrontStatus::Busy; }
-                old
-            } else {
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-            }
-        } else {
-            self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-        };
+        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
+        let old = if self.wf_components.memory_modular { self.wf_components.get_m_ptr(score_curr) } else { WF_PTR_NONE };
+        let curr_ptr = self.alloc_output(old, eff_lo, eff_hi);
         unsafe { (*curr_ptr).set_limits(lo, hi); }
 
         // Compute kernel using raw pointers for multi-borrow
@@ -923,11 +853,8 @@ impl<const N: usize> WavefrontAligner<N> {
             return;
         }
 
-        // Clamp lo/hi to leave room for kernel's k±1 reads within allocated range.
-        let hist_lo = self.wf_components.historic_min_lo;
-        let hist_hi = self.wf_components.historic_max_hi;
-        lo = lo.max(hist_lo + 1);
-        hi = hi.min(hist_hi - 1);
+        // Static/adaptive band limits (C's wavefront_compute_limits_heuristic)
+        (lo, hi) = self.clamp_limits_heuristic(lo, hi);
 
         if lo > hi {
             if self.wf_components.memory_modular {
@@ -967,30 +894,17 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         // Allocate or reuse 3 output wavefronts using pre-computed slot.
-        let (m_curr_ptr, i1_curr_ptr, d1_curr_ptr) = if self.wf_components.memory_modular {
-            macro_rules! reuse_or_alloc_slot {
-                ($comp:ident, $slot:expr) => {{
-                    let old = self.wf_components.$comp($slot);
-                    if !old.is_null() {
-                        unsafe { (*old).init(hist_lo, hist_hi); (*old).status = WavefrontStatus::Busy; }
-                        old
-                    } else {
-                        self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-                    }
-                }}
-            }
-            (
-                reuse_or_alloc_slot!(get_m_ptr_slot,  out_slot),
-                reuse_or_alloc_slot!(get_i1_ptr_slot, out_slot),
-                reuse_or_alloc_slot!(get_d1_ptr_slot, out_slot),
-            )
-        } else {
-            (
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
-            )
-        };
+        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
+        let modular = self.wf_components.memory_modular;
+        macro_rules! out_slot_wf {
+            ($comp:ident) => {{
+                let old = if modular { self.wf_components.$comp(out_slot) } else { WF_PTR_NONE };
+                self.alloc_output(old, eff_lo, eff_hi)
+            }}
+        }
+        let m_curr_ptr = crate::phase!(4, out_slot_wf!(get_m_ptr_slot));
+        let i1_curr_ptr = crate::phase!(4, out_slot_wf!(get_i1_ptr_slot));
+        let d1_curr_ptr = crate::phase!(4, out_slot_wf!(get_d1_ptr_slot));
 
         // Compute kernel using raw pointers for multi-borrow
         unsafe {
@@ -1004,7 +918,7 @@ impl<const N: usize> WavefrontAligner<N> {
             (*i1_curr_ptr).set_limits(lo, hi);
             (*d1_curr_ptr).set_limits(lo, hi);
 
-            affine::compute_affine_idm(
+            crate::phase!(5, affine::compute_affine_idm(
                 plen,
                 tlen,
                 &*wf_m_misms,
@@ -1016,7 +930,7 @@ impl<const N: usize> WavefrontAligner<N> {
                 &mut *d1_curr_ptr,
                 lo,
                 hi,
-            );
+            ));
         }
 
         // Store in components using pre-computed slot
@@ -1024,20 +938,15 @@ impl<const N: usize> WavefrontAligner<N> {
         self.wf_components.set_i1_ptr_slot(out_slot, i1_curr_ptr);
         self.wf_components.set_d1_ptr_slot(out_slot, d1_curr_ptr);
 
-        // Trim M wavefront, then clamp I/D lo/hi to M's trimmed range.
-        // This prevents untrimmed I/D wavefronts from widening the next step's range.
-        unsafe {
+        // Trim the ends of all output wavefronts (C's wavefront_compute_process_ends)
+        crate::phase!(6, unsafe {
             compute::trim_ends(plen, tlen, &mut *m_curr_ptr);
             if (*m_curr_ptr).null {
                 self.num_null_steps = i32::MAX;
             }
-            let m_lo = (*m_curr_ptr).lo;
-            let m_hi = (*m_curr_ptr).hi;
-            if (*i1_curr_ptr).lo < m_lo { (*i1_curr_ptr).lo = m_lo; }
-            if (*i1_curr_ptr).hi > m_hi { (*i1_curr_ptr).hi = m_hi; }
-            if (*d1_curr_ptr).lo < m_lo { (*d1_curr_ptr).lo = m_lo; }
-            if (*d1_curr_ptr).hi > m_hi { (*d1_curr_ptr).hi = m_hi; }
-        }
+            compute::trim_ends(plen, tlen, &mut *i1_curr_ptr);
+            compute::trim_ends(plen, tlen, &mut *d1_curr_ptr);
+        });
     }
 
     /// Compute the next wavefront for gap-affine 2-piece distance.
@@ -1102,11 +1011,8 @@ impl<const N: usize> WavefrontAligner<N> {
             return;
         }
 
-        // Clamp lo/hi to leave room for kernel's k±1 reads
-        let hist_lo = self.wf_components.historic_min_lo;
-        let hist_hi = self.wf_components.historic_max_hi;
-        lo = lo.max(hist_lo + 1);
-        hi = hi.min(hist_hi - 1);
+        // Static/adaptive band limits (C's wavefront_compute_limits_heuristic)
+        (lo, hi) = self.clamp_limits_heuristic(lo, hi);
 
         if lo > hi {
             if self.wf_components.memory_modular {
@@ -1153,55 +1059,30 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         // Allocate or reuse output wavefronts using pre-computed slot.
-        macro_rules! reuse_or_alloc_slot {
-            ($comp:ident, $slot:expr) => {{
-                let old = self.wf_components.$comp($slot);
-                if !old.is_null() {
-                    unsafe { (*old).init(hist_lo, hist_hi); (*old).status = WavefrontStatus::Busy; }
-                    old
-                } else {
-                    self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-                }
+        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
+        let modular = self.wf_components.memory_modular;
+        macro_rules! out_slot_wf {
+            ($comp:ident) => {{
+                let old = if modular { self.wf_components.$comp(out_slot) } else { WF_PTR_NONE };
+                self.alloc_output(old, eff_lo, eff_hi)
             }}
         }
 
         let victim_ptr = &raw mut self.wf_components.wavefront_victim;
 
-        let (m_curr_ptr, i1_curr_ptr, d1_curr_ptr) =
-            if self.wf_components.memory_modular {
-                (
-                    reuse_or_alloc_slot!(get_m_ptr_slot,  out_slot),
-                    reuse_or_alloc_slot!(get_i1_ptr_slot, out_slot),
-                    reuse_or_alloc_slot!(get_d1_ptr_slot, out_slot),
-                )
-            } else {
-                (
-                    self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
-                    self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
-                    self.wavefront_slab.allocate_ptr(hist_lo, hist_hi),
-                )
-            };
+        let m_curr_ptr = out_slot_wf!(get_m_ptr_slot);
+        let i1_curr_ptr = out_slot_wf!(get_i1_ptr_slot);
+        let d1_curr_ptr = out_slot_wf!(get_d1_ptr_slot);
 
-        let (i2_curr_ptr, i2_stored) = if !use_affine_kernel {
-            let p = if self.wf_components.memory_modular {
-                reuse_or_alloc_slot!(get_i2_ptr_slot, out_slot)
-            } else {
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-            };
-            (p, true)
+        let (i2_curr_ptr, i2_stored, d2_curr_ptr, d2_stored) = if !use_affine_kernel {
+            (out_slot_wf!(get_i2_ptr_slot), true, out_slot_wf!(get_d2_ptr_slot), true)
         } else {
-            (victim_ptr, false)
-        };
-
-        let (d2_curr_ptr, d2_stored) = if !use_affine_kernel {
-            let p = if self.wf_components.memory_modular {
-                reuse_or_alloc_slot!(get_d2_ptr_slot, out_slot)
-            } else {
-                self.wavefront_slab.allocate_ptr(hist_lo, hist_hi)
-            };
-            (p, true)
-        } else {
-            (victim_ptr, false)
+            if modular {
+                // The slot's previous I2/D2 (out of scope) are replaced by NULL
+                self.wavefront_slab.free_ptr(self.wf_components.get_i2_ptr_slot(out_slot));
+                self.wavefront_slab.free_ptr(self.wf_components.get_d2_ptr_slot(out_slot));
+            }
+            (victim_ptr, false, victim_ptr, false)
         };
 
         // Compute kernel using raw pointers for multi-borrow.
@@ -1274,28 +1155,16 @@ impl<const N: usize> WavefrontAligner<N> {
         self.wf_components.set_d1_ptr_slot(out_slot, d1_curr_ptr);
         self.wf_components.set_d2_ptr_slot(out_slot, if d2_stored { d2_curr_ptr } else { WF_PTR_NONE });
 
-        // Trim M wavefront, then clamp I/D lo/hi to M's trimmed range.
-        // This prevents untrimmed I/D wavefronts from widening the next step's range
-        // without the cost of scanning each I/D wavefront's ends.
+        // Trim the ends of all output wavefronts (C's wavefront_compute_process_ends)
         unsafe {
             compute::trim_ends(plen, tlen, &mut *m_curr_ptr);
             if (*m_curr_ptr).null {
                 self.num_null_steps = i32::MAX;
             }
-            let m_lo = (*m_curr_ptr).lo;
-            let m_hi = (*m_curr_ptr).hi;
-            if (*i1_curr_ptr).lo < m_lo { (*i1_curr_ptr).lo = m_lo; }
-            if (*i1_curr_ptr).hi > m_hi { (*i1_curr_ptr).hi = m_hi; }
-            if (*d1_curr_ptr).lo < m_lo { (*d1_curr_ptr).lo = m_lo; }
-            if (*d1_curr_ptr).hi > m_hi { (*d1_curr_ptr).hi = m_hi; }
-            if i2_stored {
-                if (*i2_curr_ptr).lo < m_lo { (*i2_curr_ptr).lo = m_lo; }
-                if (*i2_curr_ptr).hi > m_hi { (*i2_curr_ptr).hi = m_hi; }
-            }
-            if d2_stored {
-                if (*d2_curr_ptr).lo < m_lo { (*d2_curr_ptr).lo = m_lo; }
-                if (*d2_curr_ptr).hi > m_hi { (*d2_curr_ptr).hi = m_hi; }
-            }
+            compute::trim_ends(plen, tlen, &mut *i1_curr_ptr);
+            compute::trim_ends(plen, tlen, &mut *d1_curr_ptr);
+            if i2_stored { compute::trim_ends(plen, tlen, &mut *i2_curr_ptr); }
+            if d2_stored { compute::trim_ends(plen, tlen, &mut *d2_curr_ptr); }
         }
     }
 
@@ -1306,16 +1175,27 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Bidirectional wavefront alignment (BiWFA).
     ///
     /// Uses divide-and-conquer with O(s) memory via bidirectional
-    /// wavefront expansion and breakpoint detection.
+    /// wavefront expansion and breakpoint detection (C's `wavefront_bialign`),
+    /// always producing the CIGAR. Heuristics apply to the breakpoint searches
+    /// and the base cases (bands shifted to each sub-problem), as in C.
     pub fn align_biwfa(&mut self, pattern: &[u8], text: &[u8]) -> i32 {
-        self.sequences.init_ascii(pattern, text, false);
         self.alignment_scope = AlignmentScope::ComputeAlignment;
+        self.align_biwfa_inner(pattern, text, false)
+    }
+
+    /// Score-only BiWFA: one breakpoint search, O(s) memory, no CIGAR
+    /// (C's `wavefront_bialign_compute_score`).
+    pub fn align_biwfa_score(&mut self, pattern: &[u8], text: &[u8]) -> i32 {
+        self.align_biwfa_inner(pattern, text, true)
+    }
+
+    fn align_biwfa_inner(&mut self, pattern: &[u8], text: &[u8], score_only: bool) -> i32 {
+        self.sequences.init_ascii(pattern, text, false);
 
         let plen = pattern.len() as i32;
         let tlen = text.len() as i32;
 
-        let max_ops = (plen + tlen + 1) as usize;
-        self.cigar.resize(max_ops);
+        self.cigar.resize(if score_only { 0 } else { (plen + tlen + 1) as usize });
         self.status = AlignStatus::Ok;
 
         // Lazily create sub-aligners and reuse them across calls (avoids 3×N alloc/free
@@ -1332,29 +1212,52 @@ impl<const N: usize> WavefrontAligner<N> {
         let mut fwd = self.biwfa_fwd.take().unwrap();
         let mut rev = self.biwfa_rev.take().unwrap();
         let mut base = self.biwfa_base.take().unwrap();
-
-        let score = Self::bialign_recursive(
-            &mut self.cigar,
-            &self.penalties,
-            self.max_alignment_steps,
-            &mut fwd,
-            &mut rev,
-            &mut base,
+        for sub in [&mut fwd, &mut rev, &mut base] {
+            sub.max_alignment_steps = self.max_alignment_steps;
+        }
+        let ctx = BiContext {
+            penalties: &self.penalties,
+            heuristic: &self.heuristic,
+            max_steps: self.max_alignment_steps,
             pattern,
             text,
-            0,
-            plen,
-            0,
-            tlen,
-            ComponentType::M,
-            ComponentType::M,
-            i32::MAX,
-            0,
-        );
+        };
+
+        let (status, score) = if score_only {
+            // C's wavefront_bialign_compute_score
+            let mut breakpoint = BiAlignBreakpoint::new();
+            let status = Self::bialign_find_breakpoint(
+                &ctx, &mut fwd, &mut rev, 0, plen, 0, tlen,
+                ComponentType::M, ComponentType::M, &mut breakpoint,
+            );
+            match status {
+                AlignStatus::Ok => (AlignStatus::Ok, breakpoint.score),
+                AlignStatus::EndReached => {
+                    let score = if fwd.status == AlignStatus::EndReached {
+                        fwd.alignment_end_pos.score
+                    } else {
+                        rev.alignment_end_pos.score
+                    };
+                    (AlignStatus::Ok, score)
+                }
+                other => (other, 0),
+            }
+        } else {
+            let min_length = plen.max(tlen) <= BIALIGN_FALLBACK_MIN_LENGTH;
+            Self::bialign_alignment(
+                &mut self.cigar, &ctx, &mut fwd, &mut rev, &mut base,
+                0, plen, 0, tlen, ComponentType::M, ComponentType::M,
+                if min_length { 0 } else { i32::MAX }, 0,
+            )
+        };
 
         self.cigar.end_v = plen;
         self.cigar.end_h = tlen;
-        self.status = AlignStatus::Completed;
+        self.status = match status {
+            AlignStatus::Ok => AlignStatus::Completed,
+            AlignStatus::MaxStepsReached | AlignStatus::Oom => status,
+            _ => AlignStatus::Unattainable,
+        };
 
         // Return sub-aligners to self for reuse on the next call.
         self.biwfa_fwd = Some(fwd);
@@ -1395,7 +1298,7 @@ impl<const N: usize> WavefrontAligner<N> {
         Self {
             sequences: WavefrontSequences::new(),
             wf_components,
-            wavefront_slab: WavefrontSlab::new(10, false, SlabMode::Reuse),
+            wavefront_slab: WavefrontSlab::new(1000, false, SlabMode::Reuse),
             penalties,
             alignment_scope: AlignmentScope::ComputeScore,
             alignment_span: AlignmentSpan::End2End,
@@ -1417,17 +1320,16 @@ impl<const N: usize> WavefrontAligner<N> {
         }
     }
 
-    /// Recursive BiWFA divide-and-conquer alignment.
-    #[allow(clippy::too_many_arguments, clippy::only_used_in_recursion)]
-    fn bialign_recursive(
+    /// Recursive BiWFA divide-and-conquer alignment of
+    /// pattern[pb..pe] vs text[tb..te] (C's `wavefront_bialign_alignment`).
+    /// Returns the status (`Ok` on success) and the alignment score.
+    #[allow(clippy::too_many_arguments)]
+    fn bialign_alignment(
         cigar: &mut Cigar,
-        penalties: &WavefrontPenalties,
-        max_steps: i32,
+        ctx: &BiContext,
         fwd: &mut WavefrontAligner<N>,
         rev: &mut WavefrontAligner<N>,
         base: &mut WavefrontAligner<N>,
-        pattern: &[u8],
-        text: &[u8],
         pb: i32,
         pe: i32,
         tb: i32,
@@ -1436,137 +1338,102 @@ impl<const N: usize> WavefrontAligner<N> {
         component_end: ComponentType,
         score_remaining: i32,
         level: i32,
-    ) -> i32 {
+    ) -> (AlignStatus, i32) {
         let plen = pe - pb;
         let tlen = te - tb;
 
-        // Trivial cases: empty sequences
+        // Trivial cases
         if tlen == 0 {
-            if plen > 0 {
-                cigar.append_deletion(plen as usize);
-            }
-            return 0;
+            cigar.append_deletion(plen as usize);
+            return (AlignStatus::Ok, 0);
         }
         if plen == 0 {
-            if tlen > 0 {
-                cigar.append_insertion(tlen as usize);
-            }
-            return 0;
+            cigar.append_insertion(tlen as usize);
+            return (AlignStatus::Ok, 0);
         }
-
-        // Fallback to standard WFA for small subproblems
-        const MIN_LENGTH: i32 = 100;
-        if score_remaining <= BIALIGN_FALLBACK_MIN_SCORE || plen.max(tlen) <= MIN_LENGTH {
-            return Self::bialign_base(
-                cigar,
-                penalties,
-                base,
-                pattern,
-                text,
-                pb,
-                pe,
-                tb,
-                te,
-                component_begin,
-                component_end,
-            );
+        // Fall back to regular WFA
+        if score_remaining <= BIALIGN_FALLBACK_MIN_SCORE {
+            return Self::bialign_base(cigar, ctx, base, pb, pe, tb, te, component_begin, component_end);
         }
 
         // Find breakpoint via bidirectional expansion
-        let p_sub = &pattern[pb as usize..pe as usize];
-        let t_sub = &text[tb as usize..te as usize];
         let mut breakpoint = BiAlignBreakpoint::new();
-
-        let found = Self::bialign_find_breakpoint(
-            penalties,
-            max_steps,
-            fwd,
-            rev,
-            p_sub,
-            t_sub,
-            component_begin,
-            component_end,
-            &mut breakpoint,
+        let status = Self::bialign_find_breakpoint(
+            ctx, fwd, rev, pb, pe, tb, te, component_begin, component_end, &mut breakpoint,
         );
-
-        if !found {
-            return Self::bialign_base(
-                cigar,
-                penalties,
-                base,
-                pattern,
-                text,
-                pb,
-                pe,
-                tb,
-                te,
-                component_begin,
-                component_end,
-            );
+        if status != AlignStatus::Ok {
+            // C's wavefront_bialign_find_breakpoint_exception: the end was reached
+            // without a breakpoint; fall back to regular WFA if cheap enough.
+            if status == AlignStatus::EndReached {
+                let score_reached = if fwd.status == AlignStatus::EndReached {
+                    fwd.alignment_end_pos.score
+                } else {
+                    rev.alignment_end_pos.score
+                };
+                if score_reached <= BIALIGN_RECOVERY_MIN_SCORE {
+                    return Self::bialign_base(cigar, ctx, base, pb, pe, tb, te, component_begin, component_end);
+                }
+                return (AlignStatus::EndUnreachable, 0);
+            }
+            return (status, 0);
         }
 
         // Split at breakpoint (forward h,v coordinates)
         let bp_h = wavefront_h(breakpoint.k_forward, breakpoint.offset_forward);
         let bp_v = wavefront_v(breakpoint.k_forward, breakpoint.offset_forward);
 
-        // Recurse on first half [pb..pb+bp_v, tb..tb+bp_h]
-        Self::bialign_recursive(
-            cigar,
-            penalties,
-            max_steps,
-            fwd,
-            rev,
-            base,
-            pattern,
-            text,
-            pb,
-            pb + bp_v,
-            tb,
-            tb + bp_h,
-            component_begin,
-            breakpoint.component,
-            breakpoint.score_forward,
-            level + 1,
+        let (status, _) = Self::bialign_alignment(
+            cigar, ctx, fwd, rev, base,
+            pb, pb + bp_v, tb, tb + bp_h,
+            component_begin, breakpoint.component,
+            breakpoint.score_forward, level + 1,
         );
-
-        // Recurse on second half [pb+bp_v..pe, tb+bp_h..te]
-        Self::bialign_recursive(
-            cigar,
-            penalties,
-            max_steps,
-            fwd,
-            rev,
-            base,
-            pattern,
-            text,
-            pb + bp_v,
-            pe,
-            tb + bp_h,
-            te,
-            breakpoint.component,
-            component_end,
-            breakpoint.score_reverse,
-            level + 1,
+        if status != AlignStatus::Ok {
+            return (status, 0);
+        }
+        let (status, _) = Self::bialign_alignment(
+            cigar, ctx, fwd, rev, base,
+            pb + bp_v, pe, tb + bp_h, te,
+            breakpoint.component, component_end,
+            breakpoint.score_reverse, level + 1,
         );
-
-        breakpoint.score
+        if status != AlignStatus::Ok {
+            return (status, 0);
+        }
+        (AlignStatus::Ok, breakpoint.score)
     }
 
-    /// Two-phase breakpoint detection for BiWFA.
+    /// Breakpoint search of BiWFA (C's `wavefront_bialign_find_breakpoint`).
+    /// Returns `Ok` if a breakpoint was found; otherwise the status that stopped
+    /// the search (`EndReached`, `EndUnreachable` or `MaxStepsReached`).
     #[allow(clippy::too_many_arguments)]
     fn bialign_find_breakpoint(
-        penalties: &WavefrontPenalties,
-        max_steps: i32,
+        ctx: &BiContext,
         fwd: &mut WavefrontAligner<N>,
         rev: &mut WavefrontAligner<N>,
-        pattern: &[u8],
-        text: &[u8],
+        pb: i32,
+        pe: i32,
+        tb: i32,
+        te: i32,
         component_begin: ComponentType,
         component_end: ComponentType,
         breakpoint: &mut BiAlignBreakpoint,
-    ) -> bool {
+    ) -> AlignStatus {
+        let penalties = ctx.penalties;
+        let max_steps = ctx.max_steps;
+        let pattern = &ctx.pattern[pb as usize..pe as usize];
+        let text = &ctx.text[tb as usize..te as usize];
         let plen = pattern.len() as i32;
         let tlen = text.len() as i32;
+
+        // Heuristics with the band shifted to this sub-problem
+        // (C's wavefront_bialign_set_subsidiary_band): forward in sub-problem
+        // coordinates, reverse mirrored around the sub-problem's end diagonal.
+        let shift = tb - pb;
+        fwd.heuristic = shift_band(ctx.heuristic, |min_k, max_k| (min_k - shift, max_k - shift));
+        rev.heuristic = shift_band(ctx.heuristic, |min_k, max_k| {
+            (tlen - plen - (max_k - shift), tlen - plen - (min_k - shift))
+        });
 
         // Init sub-aligners with correct starting components
         // Forward starts from component_begin, reverse starts from component_end
@@ -1589,22 +1456,29 @@ impl<const N: usize> WavefrontAligner<N> {
         let max_antidiag = plen + tlen - 1;
         let mut score_fwd = 0i32;
         let mut score_rev = 0i32;
-        let mut last_was_forward = true;
+        let mut last_was_forward = false;
 
         // Extend at score 0
-        let mut fwd_max_ak = fwd.extend_biwfa_max(0);
-        let mut rev_max_ak = rev.extend_biwfa_max(0);
+        let (done, mut fwd_max_ak) = fwd.extend_end2end_max(0);
+        if done {
+            return fwd.status;
+        }
+        let (done, mut rev_max_ak) = rev.extend_end2end_max(0);
+        if done {
+            return rev.status;
+        }
 
         // Phase 1: Alternate compute+extend until antidiagonals meet
         while fwd_max_ak + rev_max_ak < max_antidiag {
             // Forward
             score_fwd += 1;
             fwd.compute_step(score_fwd);
-            let ak = fwd.extend_biwfa_max(score_fwd);
-            if ak > fwd_max_ak {
-                fwd_max_ak = ak;
-            }
+            let (done, ak) = fwd.extend_end2end_max(score_fwd);
+            fwd_max_ak = fwd_max_ak.max(ak);
             last_was_forward = true;
+            if done {
+                return fwd.status;
+            }
             if fwd_max_ak + rev_max_ak >= max_antidiag {
                 break;
             }
@@ -1612,19 +1486,18 @@ impl<const N: usize> WavefrontAligner<N> {
             // Reverse
             score_rev += 1;
             rev.compute_step(score_rev);
-            let ak = rev.extend_biwfa_max(score_rev);
-            if ak > rev_max_ak {
-                rev_max_ak = ak;
-            }
+            let (done, ak) = rev.extend_end2end_max(score_rev);
+            rev_max_ak = rev_max_ak.max(ak);
             last_was_forward = false;
-
+            if done {
+                return rev.status;
+            }
             if score_fwd + score_rev >= max_steps {
-                return false;
+                return AlignStatus::MaxStepsReached;
             }
         }
 
         // Phase 2: Alternate compute+extend with overlap checks
-        // Match C reference: overlap check first, then compute opposite direction
         let max_score_scope = fwd.wf_components.max_score_scope as i32;
 
         loop {
@@ -1658,7 +1531,9 @@ impl<const N: usize> WavefrontAligner<N> {
                 // Compute+extend reverse
                 score_rev += 1;
                 rev.compute_step(score_rev);
-                rev.extend_biwfa(score_rev);
+                if rev.extend_end2end(score_rev) {
+                    return rev.status;
+                }
             }
 
             // Check reverse overlap
@@ -1690,35 +1565,36 @@ impl<const N: usize> WavefrontAligner<N> {
             // Compute+extend forward
             score_fwd += 1;
             fwd.compute_step(score_fwd);
-            fwd.extend_biwfa(score_fwd);
-
+            if fwd.extend_end2end(score_fwd) {
+                return fwd.status;
+            }
             if score_fwd + score_rev >= max_steps {
-                return false;
+                return AlignStatus::MaxStepsReached;
             }
 
             last_was_forward = true;
         }
 
-        breakpoint.found()
+        AlignStatus::Ok
     }
-
     /// Base case: run standard WFA with component-aware backtrace.
     #[allow(clippy::too_many_arguments)]
     fn bialign_base(
         cigar: &mut Cigar,
-        penalties: &WavefrontPenalties,
+        ctx: &BiContext,
         base: &mut WavefrontAligner<N>,
-        pattern: &[u8],
-        text: &[u8],
         pb: i32,
         pe: i32,
         tb: i32,
         te: i32,
         component_begin: ComponentType,
         component_end: ComponentType,
-    ) -> i32 {
-        let p_sub = &pattern[pb as usize..pe as usize];
-        let t_sub = &text[tb as usize..te as usize];
+    ) -> (AlignStatus, i32) {
+        let penalties = ctx.penalties;
+        let p_sub = &ctx.pattern[pb as usize..pe as usize];
+        let t_sub = &ctx.text[tb as usize..te as usize];
+        // Master heuristic, band shifted to this sub-problem
+        base.heuristic = shift_band(ctx.heuristic, |min_k, max_k| (min_k - (tb - pb), max_k - (tb - pb)));
 
         // Init sequences and alignment with the specified starting component
         base.sequences.init_ascii(p_sub, t_sub, false);
@@ -1741,6 +1617,14 @@ impl<const N: usize> WavefrontAligner<N> {
 
             // Check termination on the component_end wavefront
             if Self::check_component_termination(base, score, component_end) {
+                break;
+            }
+            // Heuristic cut-off (as C's wavefront_extend_end2end)
+            if !m_ptr.is_null()
+                && !matches!(base.heuristic, HeuristicStrategy::None)
+                && base.apply_heuristic_cutoff(score, m_ptr)
+            {
+                base.status = AlignStatus::EndUnreachable;
                 break;
             }
 
@@ -1813,9 +1697,10 @@ impl<const N: usize> WavefrontAligner<N> {
                 }
             }
             cigar.append_forward(&base.cigar);
+            (AlignStatus::Ok, score)
+        } else {
+            (AlignStatus::Unattainable, score)
         }
-
-        score
     }
 
     /// Initialize alignment with a specific starting component (for BiWFA base case).
@@ -1829,11 +1714,9 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         self.wf_components.resize(plen, tlen, &self.penalties);
-        if self.wf_components.memory_modular {
-            self.wavefront_slab.clear();
-        } else {
-            self.wavefront_slab.reap_cigar();
-        }
+        let mode = if self.wf_components.memory_modular { SlabMode::Reuse } else { SlabMode::Tight };
+        self.wavefront_slab.set_mode(mode);
+        if mode == SlabMode::Reuse { self.wavefront_slab.clear(); } else { self.wavefront_slab.recycle(); }
 
         // Pre-size slab to avoid Vec reallocations that would invalidate stored *mut Wavefront ptrs.
         {
@@ -1853,19 +1736,13 @@ impl<const N: usize> WavefrontAligner<N> {
 
         self.num_null_steps = 0;
         self.status = AlignStatus::Ok;
-        self.alignment_end_pos = WavefrontPos::default();
+        self.alignment_end_pos = WavefrontPos { score: -1, k: i32::MAX, offset: OFFSET_NULL };
         self.heuristic_state.reset(&self.heuristic);
 
-        let max_score_scope = self.wf_components.max_score_scope as i32;
-        let eff_lo = -(plen + max_score_scope + 2);
-        let eff_hi = tlen + max_score_scope + 2;
-
-        self.wf_components.historic_min_lo = eff_lo;
-        self.wf_components.historic_max_hi = eff_hi;
-        self.wavefront_slab.ensure_min_length(eff_lo, eff_hi);
-        self.wf_components.resize_null_victim(eff_lo, eff_hi);
-
         // Allocate initial wavefront at score 0
+        self.wf_components.historic_min_lo = 0;
+        self.wf_components.historic_max_hi = 0;
+        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(0, 0);
         let wf_ptr = self.wavefront_slab.allocate_ptr(eff_lo, eff_hi);
         unsafe {
             (*wf_ptr).set_offset(0, 0);
@@ -1918,6 +1795,33 @@ impl<const N: usize> WavefrontAligner<N> {
         }
     }
 
+    /// Output wavefront allocated over [eff_lo, eff_hi]. In modular mode `old` is
+    /// the out-of-scope wavefront in the output slot: reuse it if large enough.
+    #[inline(always)]
+    fn alloc_output(&mut self, old: *mut Wavefront, eff_lo: i32, eff_hi: i32) -> *mut Wavefront {
+        if !old.is_null() {
+            unsafe {
+                if (*old).wf_elements_allocated >= wavefront_length(eff_lo, eff_hi) {
+                    (*old).init(eff_lo, eff_hi);
+                    (*old).status = WavefrontStatus::Busy;
+                    return old;
+                }
+            }
+            self.wavefront_slab.free_ptr(old);
+        }
+        self.wavefront_slab.allocate_ptr(eff_lo, eff_hi)
+    }
+
+    /// Clamp compute limits to the band (C's `wavefront_compute_limits_heuristic`).
+    #[inline(always)]
+    fn clamp_limits_heuristic(&self, lo: i32, hi: i32) -> (i32, i32) {
+        match self.heuristic {
+            HeuristicStrategy::BandedStatic { min_k, max_k }
+            | HeuristicStrategy::BandedAdaptive { min_k, max_k, .. } => (lo.max(min_k), hi.min(max_k)),
+            _ => (lo, hi),
+        }
+    }
+
     /// Free old wavefronts at the modular slot for affine (M, I1, D1).
     #[inline(always)]
     fn free_output_wavefronts_affine(&mut self, slot: usize) {
@@ -1951,6 +1855,34 @@ impl<const N: usize> WavefrontAligner<N> {
             DistanceMetric::GapAffine => self.compute_affine_step(score),
             DistanceMetric::GapAffine2p => self.compute_affine2p_step(score),
         }
+    }
+
+    /// Extend the M-wavefront at `score`, check termination and apply heuristics
+    /// (C's `wavefront_extend_end2end_max`). Returns (done, max antidiagonal).
+    fn extend_end2end_max(&mut self, score: i32) -> (bool, i32) {
+        let m_ptr = self.wf_components.get_m_ptr(score as usize);
+        if m_ptr.is_null() {
+            self.num_null_steps += 1;
+            if self.num_null_steps > self.wf_components.max_score_scope as i32 {
+                self.status = AlignStatus::EndUnreachable;
+                return (true, 0);
+            }
+            return (false, 0);
+        }
+        self.num_null_steps = 0;
+        let max_ak = self.extend_biwfa_max(score);
+        let plen = self.sequences.pattern_length;
+        let tlen = self.sequences.text_length;
+        if termination::termination_end2end(plen, tlen, unsafe { &*m_ptr }) {
+            self.alignment_end_pos = WavefrontPos { score, k: tlen - plen, offset: tlen };
+            self.status = AlignStatus::EndReached;
+            return (true, 0);
+        }
+        if !matches!(self.heuristic, HeuristicStrategy::None) && self.apply_heuristic_cutoff(score, m_ptr) {
+            self.status = AlignStatus::EndUnreachable;
+            return (true, 0);
+        }
+        (false, max_ak)
     }
 
     /// Extend wavefront for BiWFA, returning max antidiagonal.

@@ -174,7 +174,8 @@ fn build_penalties(cli: &Cli) -> WavefrontPenalties {
 }
 
 fn parse_heuristic(name: &str, params: Option<&str>) -> HeuristicStrategy {
-    let p: Vec<i32> = if let Some(params) = params {
+    // Missing parameters default to -1, as in C's align_benchmark (P3 is optional).
+    let mut p: Vec<i32> = if let Some(params) = params {
         params
             .split(',')
             .map(|s| s.trim().parse().expect("Invalid heuristic parameter"))
@@ -182,6 +183,7 @@ fn parse_heuristic(name: &str, params: Option<&str>) -> HeuristicStrategy {
     } else {
         Vec::new()
     };
+    p.resize(p.len().max(3), -1);
     match name {
         "none" => HeuristicStrategy::None,
         "wfa-adaptive" => HeuristicStrategy::WfAdaptive {
@@ -189,8 +191,14 @@ fn parse_heuristic(name: &str, params: Option<&str>) -> HeuristicStrategy {
             max_distance_threshold: p[1],
             steps_between_cutoffs: p[2],
         },
-        "xdrop" => HeuristicStrategy::XDrop { xdrop: p[0] },
-        "zdrop" => HeuristicStrategy::ZDrop { zdrop: p[0] },
+        "xdrop" => HeuristicStrategy::XDrop {
+            xdrop: p[0],
+            steps_between_cutoffs: p[1],
+        },
+        "zdrop" => HeuristicStrategy::ZDrop {
+            zdrop: p[0],
+            steps_between_cutoffs: p[1],
+        },
         "banded-static" => HeuristicStrategy::BandedStatic {
             min_k: p[0],
             max_k: p[1],
@@ -204,6 +212,46 @@ fn parse_heuristic(name: &str, params: Option<&str>) -> HeuristicStrategy {
             eprintln!("Unknown heuristic: {}", other);
             std::process::exit(1);
         }
+    }
+}
+
+/// Alignment span from `--wfa-span`.
+enum Span {
+    Global,
+    Extension,
+    /// Ends-free P0,Pf,T0,Tf: a value in [0,1] is a fraction of the sequence
+    /// length, otherwise an absolute length (C's `nominal_prop_u32`).
+    EndsFree([f64; 4]),
+}
+
+fn parse_span(span: Option<&str>) -> Span {
+    let Some(span) = span else { return Span::Global };
+    let mut fields = span.split(',');
+    match fields.next() {
+        Some("global") => Span::Global,
+        Some("extension" | "extend") => Span::Extension,
+        Some("ends-free" | "endsfree") => {
+            let v: Vec<f64> = fields
+                .map(|f| f.trim().parse().expect("Invalid --wfa-span"))
+                .collect();
+            if v.len() != 4 {
+                eprintln!("Invalid --wfa-span");
+                std::process::exit(1);
+            }
+            Span::EndsFree([v[0], v[1], v[2], v[3]])
+        }
+        _ => {
+            eprintln!("Option '--wfa-span' must be in {{'global','extension','ends-free'}}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn nominal_prop(base: usize, factor: f64) -> i32 {
+    if (0.0..=1.0).contains(&factor) {
+        (base as f64 * factor) as u32 as i32
+    } else {
+        factor as u32 as i32
     }
 }
 
@@ -231,6 +279,38 @@ impl AnyAligner {
             AnyAligner::N1(a) => a.align_biwfa(pattern, text),
             AnyAligner::N3(a) => a.align_biwfa(pattern, text),
             AnyAligner::N5(a) => a.align_biwfa(pattern, text),
+        }
+    }
+
+    fn align_endsfree(&mut self, pattern: &[u8], text: &[u8]) -> i32 {
+        match self {
+            AnyAligner::N1(a) => a.align_endsfree(pattern, text),
+            AnyAligner::N3(a) => a.align_endsfree(pattern, text),
+            AnyAligner::N5(a) => a.align_endsfree(pattern, text),
+        }
+    }
+
+    fn set_alignment_free_ends(&mut self, p0: i32, pf: i32, t0: i32, tf: i32) {
+        match self {
+            AnyAligner::N1(a) => a.set_alignment_free_ends(p0, pf, t0, tf),
+            AnyAligner::N3(a) => a.set_alignment_free_ends(p0, pf, t0, tf),
+            AnyAligner::N5(a) => a.set_alignment_free_ends(p0, pf, t0, tf),
+        }
+    }
+
+    fn set_alignment_extension(&mut self) {
+        match self {
+            AnyAligner::N1(a) => a.set_alignment_extension(),
+            AnyAligner::N3(a) => a.set_alignment_extension(),
+            AnyAligner::N5(a) => a.set_alignment_extension(),
+        }
+    }
+
+    fn align_biwfa_score(&mut self, pattern: &[u8], text: &[u8]) -> i32 {
+        match self {
+            AnyAligner::N1(a) => a.align_biwfa_score(pattern, text),
+            AnyAligner::N3(a) => a.align_biwfa_score(pattern, text),
+            AnyAligner::N5(a) => a.align_biwfa_score(pattern, text),
         }
     }
 
@@ -319,6 +399,11 @@ fn main() {
     let score_only = cli.wfa_score_only;
     let use_biwfa = cli.wfa_memory.as_deref() == Some("ultralow");
     let do_check = cli.check.is_some() && !score_only;
+    let span = parse_span(cli.wfa_span.as_deref());
+    if use_biwfa && !matches!(span, Span::Global) {
+        eprintln!("[WFA] BiWFA ends-free/extension is not supported");
+        std::process::exit(1);
+    }
 
     let mut aligner = build_aligner(penalties.clone());
 
@@ -334,6 +419,9 @@ fn main() {
     if let Some(max_steps) = cli.wfa_max_steps {
         aligner.set_max_alignment_steps(max_steps);
     }
+    if matches!(span, Span::Extension) {
+        aligner.set_alignment_extension();
+    }
 
     let mut output_lines: Vec<String> = Vec::with_capacity(pairs.len());
     let mut correct_count = 0u32;
@@ -342,11 +430,20 @@ fn main() {
     let mut align_nanos: u64 = 0;
 
     for (pattern, text) in &pairs {
+        if let Span::EndsFree(f) = span {
+            aligner.set_alignment_free_ends(
+                nominal_prop(pattern.len(), f[0]),
+                nominal_prop(pattern.len(), f[1]),
+                nominal_prop(text.len(), f[2]),
+                nominal_prop(text.len(), f[3]),
+            );
+        }
         let t0 = std::time::Instant::now();
-        let wfa_score = if use_biwfa && !score_only {
-            aligner.align_biwfa(pattern, text)
-        } else {
-            aligner.align_end2end(pattern, text)
+        let wfa_score = match span {
+            Span::Global if use_biwfa && score_only => aligner.align_biwfa_score(pattern, text),
+            Span::Global if use_biwfa => aligner.align_biwfa(pattern, text),
+            Span::Global => aligner.align_end2end(pattern, text),
+            Span::Extension | Span::EndsFree(_) => aligner.align_endsfree(pattern, text),
         };
         align_nanos += t0.elapsed().as_nanos() as u64;
 
@@ -365,7 +462,13 @@ fn main() {
             aligner.cigar().to_string_rle(true)
         };
 
-        output_lines.push(format!("{}\t{}", output_score, cigar_str));
+        // As C's benchmark_print_output: no CIGAR (e.g. dropped before any
+        // alignment) prints score -1 and "-"
+        if !score_only && aligner.cigar().is_null() {
+            output_lines.push("-1\t-".to_string());
+        } else {
+            output_lines.push(format!("{}\t{}", output_score, cigar_str));
+        }
 
         if do_check && !score_only {
             match aligner.cigar().check_alignment(pattern, text) {
@@ -401,6 +504,8 @@ fn main() {
             println!("{}", line);
         }
     }
+
+    wfa2lib_rs::prof::report();
 
     // Print check results
     if do_check {

@@ -400,7 +400,12 @@ unsafe fn extend_end2end_max_avx2(
 
 /// Extend matches for ends-free alignment, checking termination at each diagonal.
 ///
-/// Returns `Some((k, offset))` if a valid termination point is found, `None` otherwise.
+/// Returns `Some((k, offset))` for the first diagonal that reaches a free end,
+/// `None` otherwise. When several diagonals terminate in the same step, which
+/// one is reported decides the alignment, so the order of the checks follows
+/// C's kernel for the target: with AVX2, `wavefront_extend_matches_packed_endsfree_avx2`
+/// (peeled diagonals first, then per 8-diagonal chunk the diagonals whose first
+/// 4 characters matched, then all diagonals); otherwise lo to hi.
 #[inline]
 pub fn extend_matches_packed_endsfree(
     sequences: &WavefrontSequences,
@@ -415,47 +420,81 @@ pub fn extend_matches_packed_endsfree(
     let text_base = ptrs.text;
     let pattern_length = sequences.pattern_length;
     let text_length = sequences.text_length;
+    let done = |k: i32, offset: WfOffset| {
+        termination::termination_endsfree(pattern_length, text_length, pattern_end_free, text_end_free, k, offset)
+    };
 
     // SAFETY: Same as extend_matches_packed_end2end.
     unsafe {
         let centered = wf.offsets_centered_mut_ptr();
-        let mut off_ptr = centered.offset(lo as isize);
-        let off_end = centered.offset(hi as isize).add(1);
-        let mut k = lo;
+        // Extend diagonal k from `offset` (>= 0); returns the new offset.
+        let extend = |k: i32, mut offset: WfOffset| -> WfOffset {
+            let mut p_ptr = pattern_base.add((offset - k) as usize);
+            let mut t_ptr = text_base.add(offset as usize);
+            let mut cmp = (p_ptr as *const u64).read_unaligned() ^ (t_ptr as *const u64).read_unaligned();
+            while cmp == 0 {
+                offset += 8;
+                p_ptr = p_ptr.add(8);
+                t_ptr = t_ptr.add(8);
+                cmp = (p_ptr as *const u64).read_unaligned() ^ (t_ptr as *const u64).read_unaligned();
+            }
+            offset + (cmp.trailing_zeros() / 8) as i32
+        };
 
-        while off_ptr < off_end {
-            let mut offset = *off_ptr;
-            if offset != OFFSET_NULL {
-                let v = (offset - k) as usize;
-                let h = offset as usize;
-                let mut p_ptr = pattern_base.add(v);
-                let mut t_ptr = text_base.add(h);
-                let mut cmp = (p_ptr as *const u64).read_unaligned()
-                    ^ (t_ptr as *const u64).read_unaligned();
-                while cmp == 0 {
-                    offset += 8;
-                    p_ptr = p_ptr.add(8);
-                    t_ptr = t_ptr.add(8);
-                    cmp = (p_ptr as *const u64).read_unaligned()
-                        ^ (t_ptr as *const u64).read_unaligned();
+        if !cfg!(target_feature = "avx2") {
+            for k in lo..=hi {
+                let offset = *centered.offset(k as isize);
+                if offset < 0 {
+                    continue;
                 }
-                offset += (cmp.trailing_zeros() / 8) as i32;
-                *off_ptr = offset;
-
-                // Check ends-free termination at this diagonal
-                if termination::termination_endsfree(
-                    pattern_length,
-                    text_length,
-                    pattern_end_free,
-                    text_end_free,
-                    k,
-                    offset,
-                ) {
+                let offset = extend(k, offset);
+                *centered.offset(k as isize) = offset;
+                if done(k, offset) {
                     return Some((k, offset));
                 }
             }
-            off_ptr = off_ptr.add(1);
-            k += 1;
+            return None;
+        }
+
+        let num_diagonals = hi - lo + 1;
+        let peel = num_diagonals % 8;
+        for k in lo..lo + peel {
+            let offset = *centered.offset(k as isize);
+            if offset < 0 {
+                continue;
+            }
+            let offset = extend(k, offset);
+            *centered.offset(k as isize) = offset;
+            if done(k, offset) {
+                return Some((k, offset));
+            }
+        }
+        if num_diagonals < 8 {
+            return None;
+        }
+        let k_min = lo + peel;
+        let mut chunk = k_min;
+        while chunk <= hi {
+            for k in chunk..chunk + 8 {
+                let offset = *centered.offset(k as isize);
+                if offset < 0 {
+                    *centered.offset(k as isize) = OFFSET_NULL;
+                    continue;
+                }
+                let extended = extend(k, offset);
+                *centered.offset(k as isize) = extended;
+                // Lanes whose first 4 characters matched are checked right away
+                if extended - offset >= 4 && done(k, extended) {
+                    return Some((k, extended));
+                }
+            }
+            chunk += 8;
+        }
+        for k in k_min..=hi {
+            let offset = *centered.offset(k as isize);
+            if offset >= 0 && done(k, offset) {
+                return Some((k, offset));
+            }
         }
     }
 

@@ -451,6 +451,10 @@ pub fn bialign_overlap<const N: usize>(
 
 /// Fallback score threshold: below this, use standard unidirectional WFA.
 pub const BIALIGN_FALLBACK_MIN_SCORE: i32 = 250;
+/// Sequences up to this length are aligned with regular WFA (top level only).
+pub const BIALIGN_FALLBACK_MIN_LENGTH: i32 = 100;
+/// Score up to which a breakpoint search that reached the end falls back to regular WFA.
+pub const BIALIGN_RECOVERY_MIN_SCORE: i32 = 500;
 
 #[cfg(test)]
 mod tests {

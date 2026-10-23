@@ -2,12 +2,16 @@
 //!
 //! Heuristics reduce computation by pruning diagonals from the wavefront
 //! that are unlikely to contribute to the optimal alignment. This trades
-//! exactness for speed on divergent sequences.
+//! exactness for speed on divergent sequences. Port of C's
+//! `wavefront_heuristic.c`.
 
 #![allow(clippy::too_many_arguments)]
 
 use crate::offset::{OFFSET_NULL, WfOffset, wavefront_h, wavefront_v};
 use crate::wavefront::Wavefront;
+
+/// Null diagonal (C's `DPMATRIX_DIAGONAL_NULL`).
+const DIAGONAL_NULL: i32 = i32::MAX;
 
 /// Heuristic strategy configuration.
 #[derive(Debug, Clone)]
@@ -20,18 +24,33 @@ pub enum HeuristicStrategy {
         max_distance_threshold: i32,
         steps_between_cutoffs: i32,
     },
-    /// X-Drop: prune diagonals with low Smith-Waterman score.
-    XDrop { xdrop: i32 },
-    /// Z-Drop: like X-Drop but can terminate alignment entirely.
-    ZDrop { zdrop: i32 },
+    /// X-Drop: prune diagonals whose Smith-Waterman score dropped more than
+    /// `xdrop` below the best seen.
+    XDrop { xdrop: i32, steps_between_cutoffs: i32 },
+    /// Z-Drop: terminate the alignment once the best Smith-Waterman score of
+    /// the wavefront drops more than `zdrop` below the best seen.
+    ZDrop { zdrop: i32, steps_between_cutoffs: i32 },
     /// Static banding: clip wavefront to fixed diagonal range.
     BandedStatic { min_k: i32, max_k: i32 },
-    /// Adaptive banding: move band dynamically based on diagonal progress.
+    /// Adaptive banding: keep a band of `max_k - min_k + 1` diagonals, moved
+    /// towards the diagonals closest to the end.
     BandedAdaptive {
         min_k: i32,
         max_k: i32,
         steps_between_cutoffs: i32,
     },
+}
+
+impl HeuristicStrategy {
+    fn steps_between_cutoffs(&self) -> i32 {
+        match *self {
+            HeuristicStrategy::WfAdaptive { steps_between_cutoffs, .. }
+            | HeuristicStrategy::XDrop { steps_between_cutoffs, .. }
+            | HeuristicStrategy::ZDrop { steps_between_cutoffs, .. }
+            | HeuristicStrategy::BandedAdaptive { steps_between_cutoffs, .. } => steps_between_cutoffs,
+            HeuristicStrategy::None | HeuristicStrategy::BandedStatic { .. } => 0,
+        }
+    }
 }
 
 /// Mutable heuristic state tracked across alignment steps.
@@ -50,27 +69,29 @@ impl Default for HeuristicState {
             steps_wait: 0,
             max_sw_score: 0,
             max_wf_score: 0,
-            max_sw_score_k: i32::MIN,
+            max_sw_score_k: DIAGONAL_NULL,
             max_sw_score_offset: OFFSET_NULL,
         }
     }
 }
 
 impl HeuristicState {
+    /// C's `wavefront_heuristic_clear`.
     pub fn reset(&mut self, strategy: &HeuristicStrategy) {
         *self = Self::default();
-        self.steps_wait = match strategy {
-            HeuristicStrategy::WfAdaptive {
-                steps_between_cutoffs,
-                ..
-            } => *steps_between_cutoffs,
-            HeuristicStrategy::BandedAdaptive {
-                steps_between_cutoffs,
-                ..
-            } => *steps_between_cutoffs,
-            _ => 0,
-        };
+        self.steps_wait = strategy.steps_between_cutoffs();
     }
+}
+
+/// Outcome of a heuristic cut-off on the M-wavefront.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cutoff {
+    /// Wavefront unchanged.
+    None,
+    /// lo/hi narrowed (the I/D wavefronts must follow).
+    Pruned,
+    /// Z-dropped: stop the alignment; the best position is in the state.
+    ZDropped,
 }
 
 /// Compute end-to-end distance for a diagonal: how far from completing alignment.
@@ -88,87 +109,58 @@ pub fn wf_distance_end2end(offset: WfOffset, k: i32, plen: i32, tlen: i32) -> i3
     left_v.max(left_h)
 }
 
-/// Apply heuristic cutoff to the M-wavefront.
+/// Apply the heuristic cut-off to the M-wavefront (C's `wavefront_heuristic_cufoff`).
 ///
-/// Returns `true` if alignment should be terminated (z-drop only).
-/// Modifies `wf`'s lo/hi bounds in-place.
+/// `buffer` (indexed by `k - buffer_base_k`) is scratch space covering [wf.lo, wf.hi].
+/// `swg_match` is the match score used for Smith-Waterman scores (X/Z-drop).
 pub fn heuristic_cutoff(
     strategy: &HeuristicStrategy,
     state: &mut HeuristicState,
     wf: &mut Wavefront,
-    distances: &mut [WfOffset],
-    distances_base_k: i32,
+    buffer: &mut [WfOffset],
+    buffer_base_k: i32,
     pattern_length: i32,
     text_length: i32,
     score: i32,
-) -> bool {
+    swg_match: i32,
+) -> Cutoff {
     if wf.lo > wf.hi {
-        return false;
+        return Cutoff::None;
     }
-
     // Decrease wait steps
     state.steps_wait -= 1;
-
-    match strategy {
-        HeuristicStrategy::None => false,
+    let lo_base = wf.lo;
+    let hi_base = wf.hi;
+    match *strategy {
+        HeuristicStrategy::None => {}
         HeuristicStrategy::WfAdaptive {
             min_wavefront_length,
             max_distance_threshold,
             steps_between_cutoffs,
-        } => {
-            wfadaptive_cutoff(
-                state,
-                wf,
-                distances,
-                distances_base_k,
-                pattern_length,
-                text_length,
-                *min_wavefront_length,
-                *max_distance_threshold,
-                *steps_between_cutoffs,
-            );
-            false
-        }
-        HeuristicStrategy::BandedStatic { min_k, max_k } => {
-            banded_static_cutoff(wf, *min_k, *max_k);
-            false
-        }
-        HeuristicStrategy::XDrop { xdrop } => {
-            xdrop_cutoff(
-                state,
-                wf,
-                distances,
-                distances_base_k,
-                pattern_length,
-                text_length,
-                score,
-                *xdrop,
-            );
-            false
-        }
-        HeuristicStrategy::ZDrop { zdrop } => zdrop_cutoff(
-            state,
-            wf,
-            distances,
-            distances_base_k,
-            pattern_length,
-            text_length,
-            score,
-            *zdrop,
+        } => wfadaptive_cutoff(
+            state, wf, buffer, buffer_base_k, pattern_length, text_length,
+            min_wavefront_length, max_distance_threshold, steps_between_cutoffs,
         ),
-        HeuristicStrategy::BandedAdaptive {
-            min_k,
-            max_k,
-            steps_between_cutoffs,
-        } => {
-            if state.steps_wait > 0 {
-                return false;
+        HeuristicStrategy::XDrop { xdrop, steps_between_cutoffs } => xdrop_cutoff(
+            state, wf, buffer, buffer_base_k, score, swg_match, xdrop, steps_between_cutoffs,
+        ),
+        HeuristicStrategy::ZDrop { zdrop, steps_between_cutoffs } => {
+            if zdrop_cutoff(state, wf, buffer, buffer_base_k, score, swg_match, zdrop, steps_between_cutoffs) {
+                return Cutoff::ZDropped;
             }
-            banded_static_cutoff(wf, *min_k, *max_k);
-            state.steps_wait = *steps_between_cutoffs;
-            false
         }
+        HeuristicStrategy::BandedStatic { min_k, max_k } => banded_static_cutoff(wf, min_k, max_k),
+        HeuristicStrategy::BandedAdaptive { min_k, max_k, steps_between_cutoffs } => banded_adaptive_cutoff(
+            state, wf, pattern_length, text_length, min_k, max_k, steps_between_cutoffs,
+        ),
     }
+    if lo_base == wf.lo && hi_base == wf.hi {
+        return Cutoff::None;
+    }
+    if wf.lo > wf.hi {
+        wf.null = true;
+    }
+    Cutoff::Pruned
 }
 
 /// WF-Adaptive heuristic: prune diagonals far from the wavefront frontier.
@@ -196,13 +188,9 @@ fn wfadaptive_cutoff(
     }
 
     // Compute distance for each diagonal
-    let offsets = wf.offsets_slice();
-    let base_k = wf.base_k();
     let mut min_distance = pattern_length.max(text_length);
-
     for k in base_lo..=base_hi {
-        let offset = offsets[(k - base_k) as usize];
-        let distance = wf_distance_end2end(offset, k, pattern_length, text_length);
+        let distance = wf_distance_end2end(wf.get_offset(k), k, pattern_length, text_length);
         distances[(k - distances_base_k) as usize] = distance;
         if distance < min_distance {
             min_distance = distance;
@@ -272,130 +260,165 @@ fn banded_static_cutoff(wf: &mut Wavefront, min_k: i32, max_k: i32) {
     }
 }
 
-/// X-Drop heuristic: prune diagonals with low Smith-Waterman score.
+/// Adaptive banding (C's `wavefront_heuristic_banded_adaptive`): keep a band of
+/// `max_k - min_k + 1` diagonals, shifted towards the side closer to the end.
+fn banded_adaptive_cutoff(
+    state: &mut HeuristicState,
+    wf: &mut Wavefront,
+    pattern_length: i32,
+    text_length: i32,
+    min_k: i32,
+    max_k: i32,
+    steps_between_cutoffs: i32,
+) {
+    // Check steps
+    if state.steps_wait > 0 {
+        return;
+    }
+    // Check wavefront length
+    let lo = wf.lo;
+    let hi = wf.hi;
+    let wf_length = hi - lo + 1;
+    if wf_length < 4 {
+        return; // We cannot do anything here
+    }
+    // Adjust the band
+    let max_wf_length = max_k - min_k + 1;
+    if wf_length > max_wf_length {
+        // Sample wavefront
+        let leeway = (wf_length - max_wf_length) / 2;
+        let quarter = wf_length / 4;
+        let dist = |k: i32| wf_distance_end2end(wf.get_offset(k), k, pattern_length, text_length);
+        let dist_p0 = dist(lo);
+        let dist_p1 = dist(lo + quarter);
+        let dist_p2 = dist(lo + 2 * quarter);
+        let dist_p3 = dist(hi);
+        // Heuristically decide where to place the band
+        let mut new_lo = lo;
+        if dist_p0 > dist_p3 {
+            new_lo += leeway;
+        }
+        if dist_p1 > dist_p2 {
+            new_lo += leeway;
+        }
+        // Set wavefront limits
+        wf.lo = new_lo.max(lo);
+        wf.hi = (new_lo + max_wf_length - 1).min(hi);
+    }
+    // Set wait steps (don't repeat this heuristic often)
+    state.steps_wait = steps_between_cutoffs;
+}
+
+/// Smith-Waterman score of every non-null diagonal into `sw_scores`; returns
+/// the wavefront's best (score, k, offset) (C's `wf_heuristic_compute_sw_scores`).
+fn compute_sw_scores(
+    wf: &Wavefront,
+    sw_scores: &mut [WfOffset],
+    sw_base_k: i32,
+    wf_score: i32,
+    swg_match: i32,
+) -> (i32, i32, WfOffset) {
+    let (mut cmax_sw_score, mut cmax_k, mut cmax_offset) = (i32::MIN, 0, 0);
+    for k in wf.lo..=wf.hi {
+        let offset = wf.get_offset(k);
+        if offset < 0 {
+            continue;
+        }
+        let v = wavefront_v(k, offset);
+        let h = wavefront_h(k, offset);
+        let sw_score = (swg_match * (v + h) - wf_score) / 2;
+        sw_scores[(k - sw_base_k) as usize] = sw_score;
+        if cmax_sw_score < sw_score {
+            cmax_sw_score = sw_score;
+            cmax_k = k;
+            cmax_offset = offset;
+        }
+    }
+    (cmax_sw_score, cmax_k, cmax_offset)
+}
+
+/// X-Drop heuristic: prune diagonals with low Smith-Waterman score
+/// (C's `wavefront_heuristic_xdrop`).
 fn xdrop_cutoff(
     state: &mut HeuristicState,
     wf: &mut Wavefront,
     sw_scores: &mut [WfOffset],
     sw_base_k: i32,
-    pattern_length: i32,
-    text_length: i32,
     wf_score: i32,
+    swg_match: i32,
     xdrop: i32,
+    steps_between_cutoffs: i32,
 ) {
-    // Compute SW scores
-    let mut current_max = i32::MIN;
-    let mut current_max_k = wf.lo;
-    compute_sw_scores(
-        wf,
-        sw_scores,
-        sw_base_k,
-        pattern_length,
-        text_length,
-        wf_score,
-        &mut current_max,
-        &mut current_max_k,
-    );
-
-    // Update global max
-    if current_max > state.max_sw_score {
-        state.max_sw_score = current_max;
-        state.max_wf_score = wf_score;
-        state.max_sw_score_k = current_max_k;
+    // Check steps
+    if state.steps_wait > 0 {
+        return;
     }
-
-    // Prune from lo
-    let mut new_lo = wf.lo;
-    for k in wf.lo..=wf.hi {
-        if state.max_sw_score - sw_scores[(k - sw_base_k) as usize] < xdrop {
-            break;
+    let (cmax_sw_score, cmax_k, _) = compute_sw_scores(wf, sw_scores, sw_base_k, wf_score, swg_match);
+    let max_sw_score = state.max_sw_score;
+    let sw = |k: i32| sw_scores[(k - sw_base_k) as usize];
+    if state.max_sw_score_k != DIAGONAL_NULL {
+        // Reduce from bottom
+        let mut k = wf.lo;
+        while k <= wf.hi {
+            if wf.get_offset(k) >= 0 && max_sw_score - sw(k) < xdrop {
+                break;
+            }
+            k += 1;
         }
-        new_lo = k + 1;
-    }
-    wf.lo = new_lo;
-
-    // Prune from hi
-    let mut new_hi = wf.hi;
-    let mut k = wf.hi;
-    while k >= wf.lo {
-        if state.max_sw_score - sw_scores[(k - sw_base_k) as usize] < xdrop {
-            break;
+        wf.lo = k;
+        // Reduce from top
+        let mut k = wf.hi;
+        while k >= wf.lo {
+            if wf.get_offset(k) >= 0 && max_sw_score - sw(k) < xdrop {
+                break;
+            }
+            k -= 1;
         }
-        new_hi = k - 1;
-        k -= 1;
+        wf.hi = k;
+        // Update maximum score observed
+        if cmax_sw_score > state.max_sw_score {
+            state.max_sw_score = cmax_sw_score;
+            state.max_sw_score_k = cmax_k;
+        }
+    } else {
+        // Update maximum score observed
+        state.max_sw_score = cmax_sw_score;
+        state.max_sw_score_k = cmax_k;
     }
-    wf.hi = new_hi;
+    // Set wait steps (don't repeat this heuristic often)
+    state.steps_wait = steps_between_cutoffs;
 }
 
-/// Z-Drop heuristic: like X-Drop but can terminate alignment.
+/// Z-Drop heuristic: returns true if the alignment must stop
+/// (C's `wavefront_heuristic_zdrop`). The best position seen is kept in `state`.
 fn zdrop_cutoff(
     state: &mut HeuristicState,
     wf: &mut Wavefront,
     sw_scores: &mut [WfOffset],
     sw_base_k: i32,
-    pattern_length: i32,
-    text_length: i32,
     wf_score: i32,
+    swg_match: i32,
     zdrop: i32,
+    steps_between_cutoffs: i32,
 ) -> bool {
-    // Compute SW scores
-    let mut current_max = i32::MIN;
-    let mut current_max_k = wf.lo;
-    compute_sw_scores(
-        wf,
-        sw_scores,
-        sw_base_k,
-        pattern_length,
-        text_length,
-        wf_score,
-        &mut current_max,
-        &mut current_max_k,
-    );
-
-    // Check z-drop condition
-    if state.max_sw_score - current_max > zdrop {
+    // Check steps
+    if state.steps_wait > 0 {
+        return false;
+    }
+    let (cmax_sw_score, cmax_k, cmax_offset) =
+        compute_sw_scores(wf, sw_scores, sw_base_k, wf_score, swg_match);
+    if state.max_sw_score_k == DIAGONAL_NULL || cmax_sw_score > state.max_sw_score {
+        // Update maximum score observed
+        state.max_sw_score = cmax_sw_score;
+        state.max_wf_score = wf_score;
+        state.max_sw_score_k = cmax_k;
+        state.max_sw_score_offset = cmax_offset;
+    } else if state.max_sw_score - cmax_sw_score > zdrop {
         return true; // Z-dropped
     }
-
-    // Update global max
-    if current_max > state.max_sw_score {
-        state.max_sw_score = current_max;
-        state.max_wf_score = wf_score;
-        state.max_sw_score_k = current_max_k;
-    }
-
+    // Set wait steps (don't repeat this heuristic often)
+    state.steps_wait = steps_between_cutoffs;
     false
-}
-
-/// Compute Smith-Waterman scores for each diagonal.
-/// SW_score(k) = 2 * offset - wf_score (antidiagonal minus penalties).
-fn compute_sw_scores(
-    wf: &Wavefront,
-    sw_scores: &mut [WfOffset],
-    sw_base_k: i32,
-    _pattern_length: i32,
-    _text_length: i32,
-    wf_score: i32,
-    max_sw_score: &mut i32,
-    max_sw_score_k: &mut i32,
-) {
-    let offsets = wf.offsets_slice();
-    let base_k = wf.base_k();
-    *max_sw_score = i32::MIN;
-
-    for k in wf.lo..=wf.hi {
-        let offset = offsets[(k - base_k) as usize];
-        let sw = if offset >= 0 {
-            2 * offset - wf_score
-        } else {
-            i32::MIN / 2
-        };
-        sw_scores[(k - sw_base_k) as usize] = sw;
-        if sw > *max_sw_score {
-            *max_sw_score = sw;
-            *max_sw_score_k = k;
-        }
-    }
 }
 
 /// Propagate M-wavefront's narrowed bounds to an I/D wavefront.

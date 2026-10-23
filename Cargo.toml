@@ -15,6 +15,8 @@ repository = "https://github.com/COMBINE-lab/wfa2lib-rs"
 default = ["cli", "mimalloc-alloc"]
 cli = ["dep:clap", "dep:tracing", "dep:tracing-subscriber"]
 mimalloc-alloc = ["dep:mimalloc"]
+# Cycle counters per alignment phase (profiling aid, see src/prof.rs)
+phase-timing = []
 
 [dependencies]
 # All four are binary-only (used solely under src/bin/), so they are optional

@@ -53,6 +53,57 @@ pub fn trim_ends(pattern_length: i32, text_length: i32, wf: &mut Wavefront) {
     wf.null = wf.lo > wf.hi;
 }
 
+/// `trim_ends` for an output whose offsets outside `[scan_lo, scan_hi]` are
+/// known to be null already (the kernel's inputs were null there), so the
+/// scans start at the clamped bounds and nothing outside needs nulling.
+/// Produces the same `lo`/`hi` as `trim_ends`.
+#[inline(always)]
+pub fn trim_ends_within(pattern_length: i32, text_length: i32, wf: &mut Wavefront, scan_lo: i32, scan_hi: i32) {
+    let centered = unsafe { wf.offsets_centered_mut_ptr() };
+    let lo = wf.lo;
+
+    // Trim from hi
+    let mut k = wf.hi.min(scan_hi);
+    let stop = lo.max(scan_lo);
+    while k >= stop {
+        let offset = unsafe { *centered.offset(k as isize) };
+        let h = wavefront_h(k, offset) as u32;
+        let v = wavefront_v(k, offset) as u32;
+        if h <= text_length as u32 && v <= pattern_length as u32 {
+            break;
+        }
+        unsafe { *centered.offset(k as isize) = OFFSET_NULL };
+        k -= 1;
+    }
+    if k < stop {
+        // Everything is null: same result as trim_ends (hi = lo - 1).
+        wf.hi = lo - 1;
+        wf.wf_elements_init_max = lo - 1;
+        wf.wf_elements_init_min = lo;
+        wf.null = true;
+        return;
+    }
+    wf.hi = k;
+    wf.wf_elements_init_max = k;
+
+    // Trim from lo
+    let hi = wf.hi;
+    k = stop;
+    while k <= hi {
+        let offset = unsafe { *centered.offset(k as isize) };
+        let h = wavefront_h(k, offset) as u32;
+        let v = wavefront_v(k, offset) as u32;
+        if h <= text_length as u32 && v <= pattern_length as u32 {
+            break;
+        }
+        unsafe { *centered.offset(k as isize) = OFFSET_NULL };
+        k += 1;
+    }
+    wf.lo = k;
+    wf.wf_elements_init_min = k;
+    wf.null = wf.lo > wf.hi;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

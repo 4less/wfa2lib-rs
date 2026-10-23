@@ -35,6 +35,10 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 - it7 (v7, taken, 0.995x vs v6, 0.675x vs v0; memory 5-18x lower): Tight slab sizes wavefronts by need (1.5x rounded to 32, min 64) instead of 1000 elements each.
   Dropped: gather-based AVX2 extend at count>=8/32 (+20% slower on drop case; gathers lose on short wavefronts).
 
+- it8 (v8, taken, 0.983x vs v7, 0.664x vs v0 → GOAL REACHED at 50.6% speedup): affine trim scans only within the inputs' init hull (outside is null by invariant).
+  Dropped: running min-distance in extend (+7%/+14% slower). Note: ends-free wavefronts average ~43 diagonals (begin-free span) vs ~9 for e2e; inherent (C does the same).
+  Vector trim keeps losing: likely store-forwarding stalls (32B loads spanning several of the kernel's 32B stores); kernel-mask-based trim judged not worth it.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

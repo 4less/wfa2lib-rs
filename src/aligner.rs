@@ -890,14 +890,27 @@ impl<const N: usize> WavefrontAligner<N> {
         self.wf_components.set_i1_ptr_slot(out_slot, i1_curr_ptr);
         self.wf_components.set_d1_ptr_slot(out_slot, d1_curr_ptr);
 
-        // Trim the ends of all output wavefronts (C's wavefront_compute_process_ends)
+        // Trim the ends of all output wavefronts (C's wavefront_compute_process_ends).
+        // Offsets outside an input's initialised range [init_min, init_max]
+        // are null (pads and trimmed diagonals), so an output can only be
+        // non-null where some input was: scan from those bounds.
         crate::phase!(6, unsafe {
-            compute::trim_ends(plen, tlen, &mut *m_curr_ptr);
+            let hull = |p: *mut Wavefront| -> (i32, i32) {
+                if p.is_null() { (i32::MAX, i32::MIN) } else { ((*p).wf_elements_init_min, (*p).wf_elements_init_max) }
+            };
+            let (open_lo, open_hi) = hull(ptr_m_open);
+            let (i1e_lo, i1e_hi) = hull(ptr_i1_ext);
+            let (d1e_lo, d1e_hi) = hull(ptr_d1_ext);
+            let (mm_lo, mm_hi) = hull(ptr_m_misms);
+            let (i1_lo, i1_hi) = (open_lo.min(i1e_lo).saturating_add(1), open_hi.min(i32::MAX - 1).max(i1e_hi.min(i32::MAX - 1)) + 1);
+            let (d1_lo, d1_hi) = (open_lo.min(d1e_lo).max(i32::MIN + 1) - 1, open_hi.max(d1e_hi).saturating_sub(1));
+            let (m_lo, m_hi) = (mm_lo.min(i1_lo).min(d1_lo), mm_hi.max(i1_hi).max(d1_hi));
+            compute::trim_ends_within(plen, tlen, &mut *m_curr_ptr, m_lo, m_hi);
             if (*m_curr_ptr).null {
                 self.num_null_steps = i32::MAX;
             }
-            compute::trim_ends(plen, tlen, &mut *i1_curr_ptr);
-            compute::trim_ends(plen, tlen, &mut *d1_curr_ptr);
+            compute::trim_ends_within(plen, tlen, &mut *i1_curr_ptr, i1_lo, i1_hi);
+            compute::trim_ends_within(plen, tlen, &mut *d1_curr_ptr, d1_lo, d1_hi);
         });
     }
 

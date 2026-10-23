@@ -124,13 +124,18 @@ unsafe fn fill_null(ptr: *mut WfOffset, n: usize) {
         use std::arch::x86_64::*;
         if n >= 8 {
             let v = _mm256_set1_epi32(OFFSET_NULL);
-            let mut i = 0;
-            while i + 8 <= n {
-                _mm256_storeu_si256(ptr.add(i) as *mut __m256i, v);
-                i += 8;
-            }
-            if i < n {
-                _mm256_storeu_si256(ptr.add(n - 8) as *mut __m256i, v);
+            // Pads are a few dozen elements at most: overlapping stores.
+            _mm256_storeu_si256(ptr as *mut __m256i, v);
+            _mm256_storeu_si256(ptr.add(n - 8) as *mut __m256i, v);
+            if n > 16 {
+                _mm256_storeu_si256(ptr.add(8) as *mut __m256i, v);
+                if n > 24 {
+                    let mut i = 16;
+                    while i + 8 < n {
+                        _mm256_storeu_si256(ptr.add(i) as *mut __m256i, v);
+                        i += 8;
+                    }
+                }
             }
             return;
         }
@@ -442,6 +447,12 @@ impl Wavefront {
     }
 
     // --- K-centered accessors ---
+
+    /// Highest diagonal with an allocated slot.
+    #[inline(always)]
+    pub fn allocated_max(&self) -> i32 {
+        self.base_k + self.wf_elements_allocated - 1
+    }
 
     /// Get the offset at diagonal `k`.
     #[inline(always)]

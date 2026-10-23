@@ -26,6 +26,10 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 - it4 (v4, taken, 0.934x vs v3, 0.716x vs v0): ends-free extend checks termination once per diagonal (no second pass). Dovetail/extension 0.84-0.86x.
   Note: dovetail spans make the score-0 wavefront ~91 diagonals wide, so ends-free steps are width-bound (extend), unlike e2e 150bp (~9 diagonals).
 
+- it5 (v5, taken, 0.960x vs v4, 0.687x vs v0): AVX2 affine kernel without scalar tail (overlapping last block; masked loads + pad reset for <8 diagonals); fill_null short-pad path; prefetches removed (neutral).
+  Dropped again: scalar-first vector trim (+7% slower on drop case). Vector trim seems to lose from store-forwarding on just-written nulls; leave trim scalar.
+  Per-line instruction shares inside compute_affine_step (before v5): scalar tail 21%, trim 13%, fill 12%, prefetch 5%, kernel blocks ~15%, alloc/recycle ~8%.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

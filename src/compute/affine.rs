@@ -52,6 +52,13 @@ pub fn compute_affine_idm(
         let m_curr = wf_m_curr.offsets_centered_mut_ptr();
         let i1_curr = wf_i1_curr.offsets_centered_mut_ptr();
         let d1_curr = wf_d1_curr.offsets_centered_mut_ptr();
+        // Allocated slots past `hi` in the narrowest output (AVX2 tail handling).
+        #[cfg(target_arch = "x86_64")]
+        let tail_room = wf_m_curr
+            .allocated_max()
+            .min(wf_i1_curr.allocated_max())
+            .min(wf_d1_curr.allocated_max())
+            - hi;
 
         #[cfg(target_arch = "aarch64")]
         {
@@ -71,7 +78,7 @@ pub fn compute_affine_idm(
                     pattern_length, text_length,
                     m_misms, m_open, i1_ext, d1_ext,
                     m_curr, i1_curr, d1_curr,
-                    lo, hi,
+                    lo, hi, tail_room,
                 );
             }
             #[cfg(not(target_feature = "avx2"))]
@@ -81,7 +88,7 @@ pub fn compute_affine_idm(
                         pattern_length, text_length,
                         m_misms, m_open, i1_ext, d1_ext,
                         m_curr, i1_curr, d1_curr,
-                        lo, hi,
+                        lo, hi, tail_room,
                     );
                 } else {
                     compute_affine_idm_scalar(
@@ -204,6 +211,13 @@ unsafe fn compute_affine_idm_neon(
 }
 
 /// AVX2-vectorized inner loop: processes 8 diagonals at a time.
+///
+/// There is no scalar tail: a trailing partial block is computed as a full
+/// block ending at `hi` (overlapping the previous one; the recomputed lanes
+/// get identical values). A wavefront narrower than 8 diagonals is computed
+/// with masked input loads, and the output lanes past `hi` are reset to
+/// OFFSET_NULL afterwards, provided the outputs have 8 slots of pad past
+/// `hi` (`tail_room`); otherwise it falls back to scalar.
 #[cfg(target_arch = "x86_64")]
 #[inline]
 #[target_feature(enable = "avx2")]
@@ -220,6 +234,7 @@ unsafe fn compute_affine_idm_avx2(
     d1_curr: *mut WfOffset,
     lo: i32,
     hi: i32,
+    tail_room: i32,
 ) {
     #[cfg(target_arch = "x86_64")]
     use std::arch::x86_64::*;
@@ -229,73 +244,88 @@ unsafe fn compute_affine_idm_avx2(
         return;
     }
 
-    let mut k = lo;
+    let v_one = _mm256_set1_epi32(1);
+    let v_null = _mm256_set1_epi32(OFFSET_NULL);
+    let v_sign = _mm256_set1_epi32(i32::MIN); // for unsigned compare
+    let v_tlen_biased = _mm256_xor_si256(_mm256_set1_epi32(text_length), v_sign);
+    let v_plen_biased = _mm256_xor_si256(_mm256_set1_epi32(pattern_length), v_sign);
+    let lanes = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
 
-    if count >= 8 {
-        unsafe {
-            let v_one = _mm256_set1_epi32(1);
-            let v_eight = _mm256_set1_epi32(8);
-            let v_null = _mm256_set1_epi32(OFFSET_NULL);
-            let v_tlen = _mm256_set1_epi32(text_length);
-            let v_plen = _mm256_set1_epi32(pattern_length);
-            let v_sign = _mm256_set1_epi32(i32::MIN); // for unsigned compare
-            // Bias tlen/plen for unsigned comparison: xor with sign bit
-            let v_tlen_biased = _mm256_xor_si256(v_tlen, v_sign);
-            let v_plen_biased = _mm256_xor_si256(v_plen, v_sign);
-            let mut v_k = _mm256_add_epi32(
-                _mm256_set1_epi32(lo),
-                _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0),
-            );
-            let avx_end = lo + (count & !7);
-
-            const PF_DIST: isize = 16;
-
-            while k < avx_end {
-                // Prefetch next chunk of all 4 input arrays
-                _mm_prefetch(m_open.offset(k as isize + PF_DIST) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(i1_ext.offset(k as isize + PF_DIST) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(d1_ext.offset(k as isize + PF_DIST) as *const i8, _MM_HINT_T0);
-                _mm_prefetch(m_misms.offset(k as isize + PF_DIST) as *const i8, _MM_HINT_T0);
-
-                // I1: load m_open[k-1] and i1_ext[k-1]
-                let v_m_open_km1 = _mm256_loadu_si256(m_open.offset(k as isize - 1) as *const __m256i);
-                let v_i1_ext_km1 = _mm256_loadu_si256(i1_ext.offset(k as isize - 1) as *const __m256i);
-                let v_i1 = _mm256_add_epi32(_mm256_max_epi32(v_m_open_km1, v_i1_ext_km1), v_one);
-
-                // D1: load m_open[k+1] and d1_ext[k+1]
-                let v_m_open_kp1 = _mm256_loadu_si256(m_open.offset(k as isize + 1) as *const __m256i);
-                let v_d1_ext_kp1 = _mm256_loadu_si256(d1_ext.offset(k as isize + 1) as *const __m256i);
-                let v_d1 = _mm256_max_epi32(v_m_open_kp1, v_d1_ext_kp1);
-
-                // M: load m_misms[k], add 1, then max with i1, d1
-                let v_misms = _mm256_add_epi32(
-                    _mm256_loadu_si256(m_misms.offset(k as isize) as *const __m256i),
-                    v_one,
-                );
-                let v_m = _mm256_max_epi32(v_d1, _mm256_max_epi32(v_misms, v_i1));
-
-                // Bounds check: unsigned h > tlen || v > plen
-                // Use XOR with sign bit for unsigned comparison
-                let v_h_biased = _mm256_xor_si256(v_m, v_sign);
-                let v_v = _mm256_sub_epi32(v_m, v_k);
-                let v_v_biased = _mm256_xor_si256(v_v, v_sign);
-                let h_oob = _mm256_cmpgt_epi32(v_h_biased, v_tlen_biased);
-                let v_oob = _mm256_cmpgt_epi32(v_v_biased, v_plen_biased);
-                let oob = _mm256_or_si256(h_oob, v_oob);
-                let v_m_final = _mm256_blendv_epi8(v_m, v_null, oob);
-
-                // Store results
-                _mm256_storeu_si256(m_curr.offset(k as isize) as *mut __m256i, v_m_final);
-                _mm256_storeu_si256(i1_curr.offset(k as isize) as *mut __m256i, v_i1);
-                _mm256_storeu_si256(d1_curr.offset(k as isize) as *mut __m256i, v_d1);
-
-                k += 8;
-                v_k = _mm256_add_epi32(v_k, v_eight);
-            }
-        }
+    // One block of 8 diagonals [k, k+8) from already-loaded inputs.
+    macro_rules! block {
+        ($k:expr, $m_open_km1:expr, $i1_ext_km1:expr, $m_open_kp1:expr, $d1_ext_kp1:expr, $misms_k:expr) => {{
+            let k: i32 = $k;
+            let v_k = _mm256_add_epi32(_mm256_set1_epi32(k), lanes);
+            let v_i1 = _mm256_add_epi32(_mm256_max_epi32($m_open_km1, $i1_ext_km1), v_one);
+            let v_d1 = _mm256_max_epi32($m_open_kp1, $d1_ext_kp1);
+            let v_misms = _mm256_add_epi32($misms_k, v_one);
+            let v_m = _mm256_max_epi32(v_d1, _mm256_max_epi32(v_misms, v_i1));
+            // Bounds check: unsigned h > tlen || v > plen → OFFSET_NULL
+            let v_h_biased = _mm256_xor_si256(v_m, v_sign);
+            let v_v_biased = _mm256_xor_si256(_mm256_sub_epi32(v_m, v_k), v_sign);
+            let h_oob = _mm256_cmpgt_epi32(v_h_biased, v_tlen_biased);
+            let v_oob = _mm256_cmpgt_epi32(v_v_biased, v_plen_biased);
+            let oob = _mm256_or_si256(h_oob, v_oob);
+            let v_m_final = _mm256_blendv_epi8(v_m, v_null, oob);
+            _mm256_storeu_si256(m_curr.offset(k as isize) as *mut __m256i, v_m_final);
+            _mm256_storeu_si256(i1_curr.offset(k as isize) as *mut __m256i, v_i1);
+            _mm256_storeu_si256(d1_curr.offset(k as isize) as *mut __m256i, v_d1);
+        }};
+    }
+    macro_rules! block_loadu {
+        ($k:expr) => {{
+            let k: i32 = $k;
+            block!(
+                k,
+                _mm256_loadu_si256(m_open.offset(k as isize - 1) as *const __m256i),
+                _mm256_loadu_si256(i1_ext.offset(k as isize - 1) as *const __m256i),
+                _mm256_loadu_si256(m_open.offset(k as isize + 1) as *const __m256i),
+                _mm256_loadu_si256(d1_ext.offset(k as isize + 1) as *const __m256i),
+                _mm256_loadu_si256(m_misms.offset(k as isize) as *const __m256i)
+            )
+        }};
     }
 
-    // Scalar tail for remaining diagonals
+    if count >= 8 {
+        let avx_end = lo + (count & !7);
+        let mut k = lo;
+        while k < avx_end {
+            block_loadu!(k);
+            k += 8;
+        }
+        if k <= hi {
+            // Partial tail: recompute a full block ending at hi.
+            block_loadu!(hi - 7);
+        }
+        return;
+    }
+
+    if tail_room >= 8 {
+        // Fewer than 8 diagonals: inputs are only guaranteed readable in
+        // [lo-1, hi+1], so mask the loads lane-wise; outputs past hi are
+        // reset to null below (they are pad slots that must stay null).
+        let v_count = _mm256_set1_epi32(count);
+        let mask_km1 = _mm256_cmpgt_epi32(_mm256_add_epi32(v_count, _mm256_set1_epi32(2)), lanes); // j < count+2
+        let mask_k = _mm256_cmpgt_epi32(_mm256_add_epi32(v_count, v_one), lanes); // j < count+1
+        let mask_kp1 = _mm256_cmpgt_epi32(v_count, lanes); // j < count
+        let k = lo;
+        block!(
+            k,
+            _mm256_maskload_epi32(m_open.offset(k as isize - 1), mask_km1),
+            _mm256_maskload_epi32(i1_ext.offset(k as isize - 1), mask_km1),
+            _mm256_maskload_epi32(m_open.offset(k as isize + 1), mask_kp1),
+            _mm256_maskload_epi32(d1_ext.offset(k as isize + 1), mask_kp1),
+            _mm256_maskload_epi32(m_misms.offset(k as isize), mask_k)
+        );
+        let tail = (hi + 1) as isize;
+        _mm256_storeu_si256(m_curr.offset(tail) as *mut __m256i, v_null);
+        _mm256_storeu_si256(i1_curr.offset(tail) as *mut __m256i, v_null);
+        _mm256_storeu_si256(d1_curr.offset(tail) as *mut __m256i, v_null);
+        return;
+    }
+
+    // Scalar fallback for narrow wavefronts without pad room.
+    let mut k = lo;
     while k <= hi {
         let i1_val: WfOffset = (*m_open.offset(k as isize - 1))
             .max(*i1_ext.offset(k as isize - 1)) + 1;

@@ -846,24 +846,6 @@ impl<const N: usize> WavefrontAligner<N> {
         // Ensure null/victim wavefronts cover the range
         self.wf_components.resize_null_victim(lo, hi);
 
-        // Prefetch input wavefront offset arrays into L1 cache.
-        #[cfg(target_arch = "x86_64")]
-        unsafe {
-            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
-            macro_rules! prefetch_wf {
-                ($ptr:expr, $lo:expr) => {
-                    if !$ptr.is_null() {
-                        let base = (*$ptr).centered_offsets.offset($lo as isize) as *const i8;
-                        _mm_prefetch(base, _MM_HINT_T0);
-                        _mm_prefetch(base.add(64), _MM_HINT_T0);
-                    }
-                }
-            }
-            prefetch_wf!(ptr_m_misms, lo);
-            prefetch_wf!(ptr_m_open, lo);
-            prefetch_wf!(ptr_i1_ext, lo);
-            prefetch_wf!(ptr_d1_ext, lo);
-        }
 
         // Inputs read as null outside [lo, hi]: see `Wavefront::init`.
 

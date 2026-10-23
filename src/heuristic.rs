@@ -164,11 +164,16 @@ pub fn heuristic_cutoff(
 }
 
 /// WF-Adaptive heuristic: prune diagonals far from the wavefront frontier.
+///
+/// Distances are not materialised: the minimum is a single vectorisable pass
+/// over the offsets, and the (usually short) reduction scans from both ends
+/// recompute the distance per diagonal on the fly.
+#[allow(clippy::too_many_arguments)]
 fn wfadaptive_cutoff(
     state: &mut HeuristicState,
     wf: &mut Wavefront,
-    distances: &mut [WfOffset],
-    distances_base_k: i32,
+    _distances: &mut [WfOffset],
+    _distances_base_k: i32,
     pattern_length: i32,
     text_length: i32,
     min_wavefront_length: i32,
@@ -187,22 +192,29 @@ fn wfadaptive_cutoff(
         return;
     }
 
-    // Compute distance for each diagonal
-    let mut min_distance = pattern_length.max(text_length);
-    for k in base_lo..=base_hi {
-        let distance = wf_distance_end2end(wf.get_offset(k), k, pattern_length, text_length);
-        distances[(k - distances_base_k) as usize] = distance;
-        if distance < min_distance {
-            min_distance = distance;
+    // Minimum distance over all diagonals.
+    // distance(k) = max(plen - v, tlen - h) = max(plen + k, tlen) - offset.
+    let min_distance = {
+        let n = (base_hi - base_lo + 1) as usize;
+        // SAFETY: [lo, hi] is within the wavefront's allocated range.
+        let offs = unsafe { std::slice::from_raw_parts(wf.offsets_centered_ptr().offset(base_lo as isize), n) };
+        let mut min_distance = pattern_length.max(text_length);
+        let mut k = base_lo;
+        for &offset in offs {
+            let d = (pattern_length + k).max(text_length).wrapping_sub(offset);
+            let d = if offset < 0 { i32::MAX } else { d };
+            min_distance = min_distance.min(d);
+            k += 1;
         }
-    }
+        min_distance
+    };
 
     // Reduce: preserve target diagonal
     let alignment_k = text_length - pattern_length;
     wfadaptive_reduce(
         wf,
-        distances,
-        distances_base_k,
+        pattern_length,
+        text_length,
         min_distance,
         max_distance_threshold,
         alignment_k,
@@ -214,21 +226,25 @@ fn wfadaptive_cutoff(
 }
 
 /// Reduce wavefront bounds by removing diagonals far from minimum distance.
+#[allow(clippy::too_many_arguments)]
 fn wfadaptive_reduce(
     wf: &mut Wavefront,
-    distances: &[WfOffset],
-    distances_base_k: i32,
+    pattern_length: i32,
+    text_length: i32,
     min_distance: i32,
     max_distance_threshold: i32,
     min_k: i32,
     max_k: i32,
 ) {
+    let offsets = unsafe { wf.offsets_centered_ptr() };
+    // SAFETY: k stays within [wf.lo, wf.hi], inside the allocated range.
+    let dist = |k: i32| wf_distance_end2end(unsafe { *offsets.offset(k as isize) }, k, pattern_length, text_length);
+
     // Reduce from bottom (lo)
     let top_limit = max_k.min(wf.hi);
     let mut lo_reduced = wf.lo;
     for k in wf.lo..top_limit {
-        let d = distances[(k - distances_base_k) as usize];
-        if d - min_distance <= max_distance_threshold {
+        if dist(k) - min_distance <= max_distance_threshold {
             break;
         }
         lo_reduced += 1;
@@ -240,8 +256,7 @@ fn wfadaptive_reduce(
     let mut hi_reduced = wf.hi;
     let mut k = wf.hi;
     while k > bottom_limit {
-        let d = distances[(k - distances_base_k) as usize];
-        if d - min_distance <= max_distance_threshold {
+        if dist(k) - min_distance <= max_distance_threshold {
             break;
         }
         hi_reduced -= 1;
@@ -470,20 +485,19 @@ mod tests {
         wf.init(-5, 5);
         wf.set_limits(-3, 3);
 
-        // Set distances in a buffer: middle diagonals close, edges far
-        let mut distances = vec![0i32; 11];
-        let base_k = -5;
-        // k=-3: distance=100, k=-2: distance=5, k=-1..1: distance=2, k=2: distance=5, k=3: distance=100
-        distances[(-3 - base_k) as usize] = 100;
-        distances[(-2 - base_k) as usize] = 5;
-        distances[(-1 - base_k) as usize] = 2;
-        distances[(0 - base_k) as usize] = 2;
-        distances[(1 - base_k) as usize] = 2;
-        distances[(2 - base_k) as usize] = 5;
-        distances[(3 - base_k) as usize] = 100;
+        // plen = tlen = 100: distance(k) = max(100 + k, 100) - offset.
+        // Middle diagonals close, edges far:
+        // k=-3: 100, k=-2: 5, k=-1..1: 2 (k=1: 101-99), k=2: 5 (102-97), k=3: 100 (103-3)
+        wf.set_offset(-3, 0);
+        wf.set_offset(-2, 95);
+        wf.set_offset(-1, 98);
+        wf.set_offset(0, 98);
+        wf.set_offset(1, 99);
+        wf.set_offset(2, 97);
+        wf.set_offset(3, 3);
 
         // min_distance=2, threshold=10, alignment_k=0
-        wfadaptive_reduce(&mut wf, &distances, base_k, 2, 10, 0, 0);
+        wfadaptive_reduce(&mut wf, 100, 100, 2, 10, 0, 0);
 
         // k=-3 has distance 100, 100-2=98 > 10 → pruned
         // k=-2 has distance 5, 5-2=3 <= 10 → kept

@@ -281,32 +281,106 @@ fn wfadaptive_reduce(
     max_k: i32,
 ) {
     let offsets = unsafe { wf.offsets_centered_ptr() };
-    // SAFETY: k stays within [wf.lo, wf.hi], inside the allocated range.
-    let dist = |k: i32| wf_distance_end2end(unsafe { *offsets.offset(k as isize) }, k, pattern_length, text_length);
 
-    // Reduce from bottom (lo)
-    let top_limit = max_k.min(wf.hi);
-    let mut lo_reduced = wf.lo;
-    for k in wf.lo..top_limit {
-        if dist(k) - min_distance <= max_distance_threshold {
-            break;
-        }
-        lo_reduced += 1;
-    }
-    wf.lo = lo_reduced;
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    {
+        // Eight diagonals per step from each end. A lane is "keep" when its
+        // distance is within the threshold or when it lies beyond the scan
+        // limit (alignment diagonal), exactly where the scalar loop stops.
+        // Loads may run up to 7 slots past [lo, hi]: that is inside the
+        // wavefront's pads (>= max_score_scope + 1 slots), and those lanes
+        // are never selected because they are beyond the limit.
+        use std::arch::x86_64::*;
+        unsafe {
+            let lanes = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
+            let v_tlen = _mm256_set1_epi32(text_length);
+            let v_zero = _mm256_setzero_si256();
+            let limit = min_distance.saturating_add(max_distance_threshold);
+            let v_limit = _mm256_set1_epi32(limit);
+            // keep-mask of the 8 diagonals starting at k0 (distance within limit)
+            let within = |k0: i32| -> u32 {
+                let v_off = _mm256_loadu_si256(offsets.offset(k0 as isize) as *const __m256i);
+                let v_pk = _mm256_add_epi32(_mm256_set1_epi32(pattern_length + k0), lanes);
+                let d = _mm256_sub_epi32(_mm256_max_epi32(v_pk, v_tlen), v_off);
+                let non_null = _mm256_cmpgt_epi32(v_off, _mm256_set1_epi32(-1)); // offset >= 0
+                let le = _mm256_cmpgt_epi32(v_limit, _mm256_sub_epi32(d, _mm256_set1_epi32(1))); // d <= limit
+                let _ = v_zero;
+                _mm256_movemask_ps(_mm256_castsi256_ps(_mm256_and_si256(non_null, le))) as u32
+            };
 
-    // Reduce from top (hi)
-    let bottom_limit = min_k.max(wf.lo);
-    let mut hi_reduced = wf.hi;
-    let mut k = wf.hi;
-    while k > bottom_limit {
-        if dist(k) - min_distance <= max_distance_threshold {
-            break;
+            let dist = |k: i32| wf_distance_end2end(*offsets.offset(k as isize), k, pattern_length, text_length);
+
+            // Reduce from bottom (lo): first keep diagonal in [lo, top_limit), else top_limit
+            let top_limit = max_k.min(wf.hi);
+            let mut k = wf.lo;
+            // Usually nothing or little is pruned: check the first diagonal scalar.
+            if k < top_limit && dist(k) - min_distance <= max_distance_threshold {
+                k = top_limit; // keep lo as is
+            }
+            let mut lo_reduced = if k == wf.lo { top_limit.max(wf.lo) } else { wf.lo };
+            while k < top_limit {
+                let beyond = if top_limit - k < 8 { !0u32 << (top_limit - k) } else { 0 };
+                let m = (within(k) | beyond) & 0xFF;
+                if m != 0 {
+                    lo_reduced = k + m.trailing_zeros() as i32;
+                    break;
+                }
+                k += 8;
+            }
+            wf.lo = lo_reduced;
+
+            // Reduce from top (hi): last keep diagonal in (bottom_limit, hi], else bottom_limit
+            let bottom_limit = min_k.max(wf.lo);
+            let mut k = wf.hi;
+            if k > bottom_limit && dist(k) - min_distance <= max_distance_threshold {
+                k = bottom_limit; // keep hi as is
+            }
+            let mut hi_reduced = if k == wf.hi { bottom_limit.min(wf.hi) } else { wf.hi };
+            while k > bottom_limit {
+                let k0 = k - 7;
+                // lanes with diagonal <= bottom_limit are "keep" (scan stops there)
+                let below = if k0 <= bottom_limit { (1u32 << (bottom_limit - k0 + 1)) - 1 } else { 0 };
+                let m = (within(k0) | below) & 0xFF;
+                if m != 0 {
+                    hi_reduced = k0 + 31 - m.leading_zeros() as i32;
+                    break;
+                }
+                k -= 8;
+            }
+            wf.hi = hi_reduced;
         }
-        hi_reduced -= 1;
-        k -= 1;
+        return;
     }
-    wf.hi = hi_reduced;
+
+    #[allow(unreachable_code)]
+    {
+        // SAFETY: k stays within [wf.lo, wf.hi], inside the allocated range.
+        let dist = |k: i32| wf_distance_end2end(unsafe { *offsets.offset(k as isize) }, k, pattern_length, text_length);
+
+        // Reduce from bottom (lo)
+        let top_limit = max_k.min(wf.hi);
+        let mut lo_reduced = wf.lo;
+        for k in wf.lo..top_limit {
+            if dist(k) - min_distance <= max_distance_threshold {
+                break;
+            }
+            lo_reduced += 1;
+        }
+        wf.lo = lo_reduced;
+
+        // Reduce from top (hi)
+        let bottom_limit = min_k.max(wf.lo);
+        let mut hi_reduced = wf.hi;
+        let mut k = wf.hi;
+        while k > bottom_limit {
+            if dist(k) - min_distance <= max_distance_threshold {
+                break;
+            }
+            hi_reduced -= 1;
+            k -= 1;
+        }
+        wf.hi = hi_reduced;
+    }
 }
 
 /// Static banding: clip wavefront to fixed diagonal range.

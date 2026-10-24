@@ -44,6 +44,8 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 - it10 (v10, taken, 0.985x vs v9, 0.647x vs v0): AVX-512VL unsigned compare-to-mask + mask blend for the kernel bounds check (cfg target_feature); allocate_output_ptrs::<3> single slab call.
   Observed: extend loop is already ~14 instr/diagonal (AVX-512 masked compare), branch on "32 chars all match" is unpredictable at low divergence; inherent.
 
+- it11 (v11, taken, 0.985x vs v10, 0.638x vs v0): WF-adaptive reduce vectorised (scalar-first on the end diagonal, then 8-lane blocks). Ends-free 0.96-0.98x, 1k 0.98x, short e2e neutral.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

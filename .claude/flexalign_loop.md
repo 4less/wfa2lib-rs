@@ -113,6 +113,18 @@ leak+poison or mprotect(PROT_NONE) old heap buffers on Wavefront::resize, then g
 
 - v24 committed: 213+19 cargo tests, 60/60 C-reference, 1710-config matrix == v0's failure set, flexalign A/B 1.009x (noise). Best binary = v24.
 
+## Bug-fix round (2026-10-24, after validation): making the port match WFA2-lib
+- v25: null-step accounting ported from C (compute counts all-null-input steps and stores NULL outputs; extend only checks),
+  and inputs flagged null read as the all-null wavefront (C's wavefront_compute_get_*wavefront). Root cause of the banded/X-drop
+  crashes (alignments ran past the per-score arrays), of the non-default-penalty crashes and of the end-only ends-free diffs.
+  Matrix vs C: 1029 -> 1253 pass, crashes 236 -> 47, 0 regressions. utest: p1/m/endsfree.end/xdrop families now identical to C.
+- Found: C's ends-free termination order depends on the SIMD kernel it was compiled for (AVX-512: 16-lane peel; AVX2: 8-lane).
+  Our emulation follows the AVX2 kernel; on this AVX-512 host C uses the 16-lane one -> rare tie differences (edit/indel/linear
+  endsfree.end, ~1-2 pairs per 2000). Exact DP shows both sides optimal-or-not case by case (C suboptimal in several).
+- Missing feature: ends-free with match reward != 0 (C's wavefront_compute_endsfree_required/limits/init/allocate_null):
+  affine.m endsfree/extension families (~100 configs).
+- Remaining crashes (47): BiWFA + heuristics with non-default penalties (affine.p1/m biwfa; linear biwfa bandadapt).
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

@@ -67,6 +67,9 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 
 - it19 (v19, DROPPED, 0.998x): whole gap-affine main loop specialised on (MODULAR, HEURISTIC, ENDSFREE): neutral. The remaining per-step branches outside the compute step are well predicted; not worth the code.
 
+- it20 (v20, DROPPED, 1.001x): lazy tail_room, kernel count guard removed, unconditional bt_occupancy reset: neutral.
+  Validation: tests/wfa_utest.sh (60 C-reference cases: all metrics, ends-free, heuristics, BiWFA; full CIGAR identity) passes on v18.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

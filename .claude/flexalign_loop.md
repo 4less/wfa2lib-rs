@@ -65,6 +65,8 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 - it18 (v18, taken, 0.953x vs v17, 0.597x vs v0): compute_affine_step specialised on MODULAR (const generic). Bigger than expected (150bp 0.92x): the flag loads/branches and slot() calls were in the way of scheduling.
   Idea: the same specialisation for extend_end2end/extend_endsfree + apply_heuristic_cutoff (Lambda vs packed, heuristic kind) might give a bit more.
 
+- it19 (v19, DROPPED, 0.998x): whole gap-affine main loop specialised on (MODULAR, HEURISTIC, ENDSFREE): neutral. The remaining per-step branches outside the compute step are well predicted; not worth the code.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

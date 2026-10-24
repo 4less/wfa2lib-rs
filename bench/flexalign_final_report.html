@@ -93,7 +93,7 @@ code { font-family: var(--font-mono); font-size: 0.86em; background: var(--surfa
     <div class="kpi"><div class="v">0.59×</div><div class="l">time per alignment vs v0 (weighted geo-mean, final build)</div></div>
     <div class="kpi"><div class="v">1.71×</div><div class="l">throughput vs v0</div></div>
     <div class="kpi"><div class="v">6–10×</div><div class="l">less peak heap per aligner</div></div>
-    <div class="kpi"><div class="v">1452 / 1678</div><div class="l">configs identical to C (v0: 1029)</div></div>
+    <div class="kpi"><div class="v">1632 / 1678</div><div class="l">configs identical to C with its one-line Z-drop fix (v0: 1029)</div></div>
   </div>
 </header>
 
@@ -127,9 +127,9 @@ code { font-family: var(--font-mono); font-size: 0.86em; background: var(--surfa
   <div class="eyebrow">Figure 3</div>
   <h2>Behavioural identity with WFA2-lib (1710-config differential matrix)</h2>
   <figure>
-    <svg id="fig-matrix" viewBox="0 0 860 230" role="img" aria-label="Stacked bars of matrix outcomes per stage"></svg>
+    <svg id="fig-matrix" viewBox="0 0 860 300" role="img" aria-label="Stacked bars of matrix outcomes per stage"></svg>
     <div class="legend"><span style="--sw:var(--good)">identical to C (score + CIGAR)</span><span style="--sw:var(--differ)">different output</span><span style="--sw:var(--critical)">Rust crash or hang</span></div>
-    <figcaption>5 datasets × 7 penalty sets × 3 modes × 4 ends-free spans × 6 heuristics, each pair compared on score and CIGAR against the C <code>align_benchmark</code>. 32 configs where C itself errors are excluded (1678 compared). No config that passed in v0 fails in any later stage.</figcaption>
+    <figcaption>5 datasets × 7 penalty sets × 3 modes × 4 ends-free spans × 6 heuristics, each pair compared on score and CIGAR against the C <code>align_benchmark</code>. 32 configs where C itself errors are excluded (1678 compared). No config that passed in v0 fails in any later stage, except 73 score-only Z-drop configs against plain C: there Rust deliberately scores a dropped alignment at its drop position, which C does only with the one-line fix (C backtraces a Z-drop with the current score instead of the score at the drop position).</figcaption>
   </figure>
 </section>
 
@@ -161,6 +161,14 @@ code { font-family: var(--font-mono); font-size: 0.86em; background: var(--surfa
         <li><b>Ends-free termination order</b> now follows the SIMD lane count the build targets, as the C kernel does.</li>
         <li><b>Exact input-range union</b> with null inputs, and the BiWFA unreachable check on a null base.</li>
       </ul>
+      <h3 style="margin-top:16px">Correctness <span class="pill">v26b</span></h3>
+      <ul>
+        <li><b>Z-drop</b> scored at the drop position in score-only mode too (it was converted at the full read length, e.g. 194 above the optimum of 180). Dropped BiWFA bases are traced from M.</li>
+        <li><b>Score past the array bound:</b> a band can push the score beyond C's worst-case bound. The arrays now grow; C and Rust both wrote past the end (the 4 affine2p crashes).</li>
+        <li><b>Unreachable end:</b> a band that excludes the end diagonal never empties the wavefront. Rust now stops at the largest possible path score; it ran forever, and C segfaults.</li>
+        <li><b>Edit/indel band leak:</b> the cells next to the previous wavefront are nulled each step, as in C.</li>
+        <li><b>Backtrace sources:</b> wavefronts the compute step read as null are skipped. This fixed invalid X-drop CIGARs introduced by the v25 null-input port.</li>
+      </ul>
     </div>
   </div>
 </section>
@@ -171,11 +179,14 @@ code { font-family: var(--font-mono); font-size: 0.86em; background: var(--surfa
   <table>
     <thead><tr><th>check</th><th>result</th></tr></thead>
     <tbody>
-      <tr><td>cargo tests (unit + reference)</td><td class="n pos">213 + 19 pass</td></tr>
+      <tr><td>cargo tests (unit + reference, 4 new regression tests)</td><td class="n pos">213 + 23 pass</td></tr>
       <tr><td>C-reference suite (tests/wfa_utest.sh, full CIGAR identity)</td><td class="n pos">60 / 60</td></tr>
       <tr><td>flexalign exact config vs C (96 pairs)</td><td class="n pos">96 / 96 identical</td></tr>
       <tr><td>Differential matrix vs C, regressions against v0</td><td class="n pos">0</td></tr>
       <tr><td>A/B v25 vs v24 (speed)</td><td class="n">0.98× (neutral)</td></tr>
+      <tr><td>A/B v26b vs v25 (speed, identical outputs)</td><td class="n">1.007× (neutral)</td></tr>
+      <tr><td>Valid CIGAR in every pair of all 950 CIGAR-mode configs</td><td class="n pos">950 / 950</td></tr>
+      <tr><td>Crashes or hangs in the matrix</td><td class="n pos">0</td></tr>
     </tbody>
   </table>
   </div>
@@ -183,13 +194,13 @@ code { font-family: var(--font-mono); font-size: 0.86em; background: var(--surfa
 </section>
 
 <section>
-  <h2>Remaining differences vs C (226 configs)</h2>
+  <h2>Remaining differences vs C with its Z-drop fix (46 configs)</h2>
+  <p>All remaining differences use a heuristic. Without a heuristic, and with WF-adaptive, Rust matches C everywhere. In every differing pair Rust's CIGAR is valid; C's is invalid in 15 of them.</p>
   <ul>
-    <li><b>Gap-affine with match reward (62 configs):</b> global, ends-free and extension outputs differ from C. The ends-free diagonal port fixed about 100 configs; the remaining ones need the same treatment in the main loop.</li>
-    <li><b>Gap-affine with penalties 0/3/1/4 (26):</b> ends-free, global and extension ties; includes the two X-drop pairs on short_e05 (one tie-break, one where C stops at −22 vs our −19).</li>
-    <li><b>Banded, band-adaptive and Z-drop on edit, indel, linear and gap-affine penalties (about 100):</b> a different pruning path, no crashes.</li>
-    <li><b>End-only ends-free ties (about 30):</b> one or two pairs per 2000 where C picks another optimal end point; exact DP shows C suboptimal in several.</li>
-    <li><b>Still crashing (4):</b> gap-affine 2-piece with a static or adaptive band in CIGAR mode on short_e20 and utest (segfault). BiWFA with heuristics (12) no longer crashes but differs.</li>
+    <li><b>Score of a failed alignment, match reward, score-only (16 configs):</b> a band or X-drop makes the end unreachable, and CIGAR mode reports no alignment on both sides. C still prints a score computed from uninitialised end coordinates.</li>
+    <li><b>X-drop CIGARs (24 configs; gap-linear, gap-affine, gap-affine 2-piece):</b> Rust follows the path the compute step actually took. About half of the differing pairs have the same score with another path; C's backtrace reads wavefronts its own compute step ignored.</li>
+    <li><b>Band-adaptive, match reward, ends-free CIGAR (3):</b> mostly ties; C's CIGAR is invalid in the others.</li>
+    <li><b>BiWFA with a heuristic (3):</b> one Z-drop pair where C's CIGAR is invalid, and two band-adaptive indel pairs.</li>
   </ul>
   <p class="note">Full per-config list and the loop log: <code>bench/flexalign_history.jsonl</code>, <code>bench/flexalign_report.html</code>, <code>.claude/flexalign_loop.md</code>. Matrix driver: <code>tests/diff_vs_c.sh</code>.</p>
 </section>
@@ -216,7 +227,9 @@ code { font-family: var(--font-mono); font-size: 0.86em; background: var(--surfa
     ["v24 null-range fix",1029,413,236],
     ["null steps + null inputs",1253,378,47],
     ["ends-free reward + lane order",1397,277,4],
-    ["final (v25)",1452,222,4]
+    ["v25",1452,222,4],
+    ["final v26b, plain C",1458,220,0],
+    ["final v26b, C + Z-drop fix",1632,46,0]
   ];
 
   var NS = "http://www.w3.org/2000/svg";
@@ -293,7 +306,7 @@ code { font-family: var(--font-mono); font-size: 0.86em; background: var(--surfa
   // ---- Figure 3: stacked bars ----
   (function () {
     var svg = document.getElementById("fig-matrix");
-    var L = 230, R = 20, T = 14, B = 30, W = 860, H = 230;
+    var L = 230, R = 20, T = 14, B = 30, W = 860, H = 300;
     var pw = W - L - R, rowh = (H - T - B) / stages.length;
     var total = 1678;
     var x = function (v) { return L + v / total * pw; };

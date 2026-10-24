@@ -146,3 +146,20 @@ leak+poison or mprotect(PROT_NONE) old heap buffers on Wavefront::resize, then g
   Reports: bench/flexalign_final_report.html (figures), bench/flexalign_report.html (A/B history).
 
 ## Status: STOPPED after the bug-fix iteration on user request (2026-10-24).
+
+## Bug-fix round 2 (2026-10-24 evening): v26b
+- Z-drop: Rust already traced a dropped alignment from the drop position with that position's WFA score; C uses the
+  current score (its CIGAR/score do not end at the drop point). Kept Rust's behaviour; score-only mode now also scores
+  at the drop position (C's classic score; was converted at full sequence lengths, e.g. 194 > optimum 180).
+  Dropped BiWFA bases are backtraced (from M) and appended like C. Identical to C once C's one line is fixed.
+- Per-score arrays grow when a heuristic pushes the score past C's worst-case bound (affine2p + band wrote past the end).
+- Edit/indel: null the two cells around the previous wavefront each step (C does); band-pruned cells leaked before.
+- Termination guard: stop as unreachable once score > (plen+tlen) * max single-op penalty (band excluding the end
+  diagonal ran forever: C segfaults there, Rust grew without bound).
+- Backtrace: earlier-score sources skip null-flagged wavefronts (compute substitutes them since 0d7b67c); same-score
+  I/D from M keep reading (a cut-off can flag them after M used them). Fixed invalid X-drop CIGARs (regression of 0d7b67c).
+- Perf lesson: routing the ends-free loop through compute_step changed inlining of the end-to-end loop (+5% on 150bp);
+  keep the direct dispatch there and keep cold bookkeeping (#[inline(never)]) out of terminate.
+- Result: matrix vs C-with-zdrop-fix 1632/1678, 0 crashes, 0 regressions; vs plain C 1458 (the 73 extra diffs are all
+  score-only Z-drop, by design); all 950 CIGAR configs valid; flexalign A/B 1.007x vs v25 (noise).
+- Memory lesson: run matrix sweeps with ulimit -v per process and a RAM guard; a runaway config took 90 GB once.

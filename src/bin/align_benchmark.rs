@@ -447,14 +447,18 @@ fn main() {
         };
         align_nanos += t0.elapsed().as_nanos() as u64;
 
-        let output_score = compute_output_score(
+        // Score-only (unidirectional): the aligner's classic score, as C prints
+        // cigar->score (a dropped alignment is scored at its end position).
+        let output_score = if score_only && !(use_biwfa && matches!(span, Span::Global)) {
+            aligner.cigar().score
+        } else { compute_output_score(
             aligner.cigar(),
             wfa_score,
             &penalties,
             score_only,
             pattern.len() as i32,
             text.len() as i32,
-        );
+        ) };
 
         let cigar_str = if score_only {
             "-".to_string()

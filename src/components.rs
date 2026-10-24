@@ -202,6 +202,19 @@ impl<const N: usize> WavefrontComponents<N> {
         }
     }
 
+    /// Grow the per-score arrays (non-modular) to hold at least `min_len`
+    /// scores, keeping the wavefronts stored so far. Geometric, so a long
+    /// heuristic run costs amortised O(1) per score.
+    #[cold]
+    #[inline(never)]
+    pub fn grow(&mut self, min_len: usize) {
+        let new_len = min_len.max(self.num_wavefronts * 2);
+        for arr in &mut self.arrays {
+            arr.resize(new_len, WF_PTR_NONE);
+        }
+        self.num_wavefronts = new_len;
+    }
+
     /// Resize null and victim wavefronts if the diagonal range exceeds their bounds.
     ///
     /// The compute kernels read the null wavefront over `[lo-1, hi+1]`, so the

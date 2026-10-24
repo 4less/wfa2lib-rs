@@ -237,6 +237,9 @@ impl<const N: usize> WavefrontAligner<N> {
         crate::phase!(0, self.init_alignment());
 
         // Main alignment loop
+        let score_bound = self
+            .penalties
+            .max_path_score(self.sequences.pattern_length, self.sequences.text_length);
         let mut score = 0;
         loop {
             // Extend
@@ -255,12 +258,19 @@ impl<const N: usize> WavefrontAligner<N> {
                 self.status = AlignStatus::MaxStepsReached;
                 break;
             }
+            // A heuristic can leave the end unreachable without ever emptying
+            // the wavefront (e.g. the end diagonal outside a band): stop once
+            // no alignment path can cost this much.
+            if score > score_bound {
+                self.status = AlignStatus::EndUnreachable;
+                break;
+            }
         }
 
         // Record how many flat slots were used (for efficient clear on next alignment).
         self.wf_components.prev_score_count = (score + 1) as usize;
 
-        crate::phase!(7, self.terminate());
+        crate::phase!(7, self.terminate(score));
         score
     }
 
@@ -287,6 +297,9 @@ impl<const N: usize> WavefrontAligner<N> {
         self.init_alignment();
 
         // Main alignment loop
+        let score_bound = self
+            .penalties
+            .max_path_score(self.sequences.pattern_length, self.sequences.text_length);
         let mut score = 0;
         loop {
             // Extend with ends-free termination
@@ -298,6 +311,7 @@ impl<const N: usize> WavefrontAligner<N> {
             score += 1;
 
             // Compute next wavefront based on distance metric
+            self.ensure_score_slot(score);
             match self.penalties.distance_metric {
                 DistanceMetric::Edit | DistanceMetric::Indel => {
                     self.compute_edit_step(score);
@@ -318,12 +332,19 @@ impl<const N: usize> WavefrontAligner<N> {
                 self.status = AlignStatus::MaxStepsReached;
                 break;
             }
+            // A heuristic can leave the end unreachable without ever emptying
+            // the wavefront (e.g. the end diagonal outside a band): stop once
+            // no alignment path can cost this much.
+            if score > score_bound {
+                self.status = AlignStatus::EndUnreachable;
+                break;
+            }
         }
 
         // Record how many flat slots were used (for efficient clear on next alignment).
         self.wf_components.prev_score_count = (score + 1) as usize;
 
-        self.terminate();
+        self.terminate(score);
         score
     }
 
@@ -519,12 +540,13 @@ impl<const N: usize> WavefrontAligner<N> {
     /// Finish an alignment that ended (C's `wavefront_unialign_terminate`):
     /// backtrace from `alignment_end_pos` (the end, or the best position when a
     /// heuristic dropped the alignment), then trim for extension/unreachable ends.
-    fn terminate(&mut self) {
+    fn terminate(&mut self, score: i32) {
         if self.status != AlignStatus::EndReached && self.status != AlignStatus::EndUnreachable {
             return;
         }
         let unreachable = self.status == AlignStatus::EndUnreachable;
         if self.alignment_scope == AlignmentScope::ComputeScore {
+            self.terminate_score_only(score, unreachable);
             self.status = if unreachable { AlignStatus::Partial } else { AlignStatus::Completed };
             return;
         }
@@ -553,6 +575,35 @@ impl<const N: usize> WavefrontAligner<N> {
         } else {
             AlignStatus::Completed
         };
+    }
+
+    /// Score-only end of an alignment (C's compute_score branch of
+    /// `wavefront_unialign_terminate`): record where the alignment ends and its
+    /// classic score. A dropped alignment ends at the drop position, so its
+    /// score is converted there (with the WFA score of that position), not at
+    /// the full sequence lengths.
+    #[inline(never)]
+    fn terminate_score_only(&mut self, score: i32, unreachable: bool) {
+        let pos = self.alignment_end_pos;
+        let (end_v, end_h, end_score) = if unreachable && pos.offset != OFFSET_NULL {
+            (wavefront_v(pos.k, pos.offset), wavefront_h(pos.k, pos.offset), pos.score)
+        } else {
+            (self.sequences.pattern_length, self.sequences.text_length, score)
+        };
+        self.cigar.end_v = end_v;
+        self.cigar.end_h = end_h;
+        self.cigar.score = self.classic_score(end_v, end_h, end_score);
+    }
+
+    /// Score in the user's convention (C's `wavefront_compute_classic_score`):
+    /// distance for edit/indel, negated penalty without match reward, and the
+    /// Smith-Waterman score at (`v`, `h`) with a match reward.
+    fn classic_score(&self, v: i32, h: i32, wf_score: i32) -> i32 {
+        match self.penalties.distance_metric {
+            DistanceMetric::Indel | DistanceMetric::Edit => wf_score,
+            _ if self.penalties.match_ == 0 => -wf_score,
+            _ => self.penalties.wf_score_to_sw_score(v, h, wf_score),
+        }
     }
 
     /// Apply maxtrim to the CIGAR based on the distance metric.
@@ -774,7 +825,18 @@ impl<const N: usize> WavefrontAligner<N> {
         let lo = prev_lo - 1;
         let hi = prev_hi + 1;
 
-        // Inputs read as null outside [lo, hi]: see `Wavefront::init`.
+        // Inputs read as null outside [lo, hi]: see `Wavefront::init`. As C's
+        // wavefront_compute_edit, also null the two cells on each side of the
+        // previous wavefront: a heuristic (band, WF-adaptive, ...) narrows lo/hi
+        // but leaves the pruned offsets in place, and they must not feed the
+        // next wavefront.
+        unsafe {
+            let prev = &mut *prev_ptr;
+            prev.set_offset_if_allocated(lo - 1, OFFSET_NULL);
+            prev.set_offset_if_allocated(lo, OFFSET_NULL);
+            prev.set_offset_if_allocated(hi, OFFSET_NULL);
+            prev.set_offset_if_allocated(hi + 1, OFFSET_NULL);
+        }
 
         // Allocate or reuse output wavefront
         let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
@@ -1540,6 +1602,7 @@ impl<const N: usize> WavefrontAligner<N> {
         let text = &ctx.text[tb as usize..te as usize];
         let plen = pattern.len() as i32;
         let tlen = text.len() as i32;
+        let score_bound = penalties.max_path_score(plen, tlen);
 
         // Heuristics with the band shifted to this sub-problem
         // (C's wavefront_bialign_set_subsidiary_band): forward in sub-problem
@@ -1609,6 +1672,9 @@ impl<const N: usize> WavefrontAligner<N> {
             }
             if score_fwd + score_rev >= max_steps {
                 return AlignStatus::MaxStepsReached;
+            }
+            if score_fwd + score_rev > score_bound {
+                return AlignStatus::EndUnreachable;
             }
         }
 
@@ -1686,6 +1752,9 @@ impl<const N: usize> WavefrontAligner<N> {
             if score_fwd + score_rev >= max_steps {
                 return AlignStatus::MaxStepsReached;
             }
+            if score_fwd + score_rev > score_bound {
+                return AlignStatus::EndUnreachable;
+            }
 
             last_was_forward = true;
         }
@@ -1717,6 +1786,7 @@ impl<const N: usize> WavefrontAligner<N> {
 
         // Alignment loop: extend M for match propagation, but check
         // the component_end wavefront for termination.
+        let score_bound = penalties.max_path_score(pe - pb, te - tb);
         let mut score = 0;
         loop {
             // Always extend M wavefront (needed for correct propagation)
@@ -1765,14 +1835,27 @@ impl<const N: usize> WavefrontAligner<N> {
                 base.status = AlignStatus::MaxStepsReached;
                 break;
             }
+            if score > score_bound {
+                base.status = AlignStatus::EndUnreachable;
+                break;
+            }
         }
 
         // Record how many flat slots were used (for efficient clear on next call).
         base.wf_components.prev_score_count = (score + 1) as usize;
 
-        // Backtrace with component-aware start/end
-        if base.status == AlignStatus::EndReached {
+        // Backtrace with component-aware start/end. As C's unialign terminate, a
+        // Z-dropped base alignment is backtraced from the drop position and
+        // trimmed to its maximal-score prefix; the partial CIGAR is appended
+        // and the sub-problem reported unattainable.
+        let dropped = base.status == AlignStatus::EndUnreachable
+            && base.alignment_end_pos.offset != OFFSET_NULL;
+        if base.status == AlignStatus::EndReached || dropped {
             let pos = base.alignment_end_pos;
+            // The drop position is an M cell: a dropped alignment is traced
+            // back from M whatever component the sub-problem had to end in
+            // (C traces it from component_end and emits an invalid CIGAR).
+            let component_end = if dropped { ComponentType::M } else { component_end };
             match penalties.distance_metric {
                 DistanceMetric::GapAffine => {
                     backtrace::backtrace_affine(
@@ -1817,6 +1900,11 @@ impl<const N: usize> WavefrontAligner<N> {
                         &mut base.cigar,
                     );
                 }
+            }
+            if dropped {
+                base.maxtrim_cigar();
+                cigar.append_forward(&base.cigar);
+                return (AlignStatus::Unattainable, score);
             }
             cigar.append_forward(&base.cigar);
             (AlignStatus::Ok, score)
@@ -1972,7 +2060,19 @@ impl<const N: usize> WavefrontAligner<N> {
     }
 
     /// Dispatch compute step based on distance metric.
+    /// The per-score arrays are sized by the worst-case optimal score (as in
+    /// C). A heuristic (e.g. a band) can force a worse alignment whose score
+    /// passes that bound: grow instead of writing past the end (C writes into
+    /// its allocator pool there).
+    #[inline(always)]
+    fn ensure_score_slot(&mut self, score: i32) {
+        if !self.wf_components.memory_modular && score as usize >= self.wf_components.num_wavefronts {
+            self.wf_components.grow(score as usize + 1);
+        }
+    }
+
     fn compute_step(&mut self, score: i32) {
+        self.ensure_score_slot(score);
         match self.penalties.distance_metric {
             DistanceMetric::Edit | DistanceMetric::Indel => self.compute_edit_step(score),
             DistanceMetric::GapLinear => self.compute_linear_step(score),

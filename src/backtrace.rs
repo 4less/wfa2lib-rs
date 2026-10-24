@@ -41,6 +41,12 @@ fn piggyback_get_type(value: i64) -> i64 {
     value & BACKTRACE_TYPE_MASK
 }
 
+// Lookups into an earlier score skip a wavefront flagged null: the compute
+// step read it as the all-null wavefront (C's wavefront_compute_get_*), so it
+// cannot be a source. Same-score I/D lookups from the M state (bt_i1_ext,
+// bt_d1_ext, bt_i2_ext, bt_d2_ext) do not: a heuristic cut-off at that score
+// can flag I/D null after M was already computed from them.
+
 /// Look up mismatch predecessor: M-wavefront at (score, k), offset + 1.
 #[inline(always)]
 fn bt_misms<const N: usize>(wf_components: &WavefrontComponents<N>, score: i32, k: i32) -> i64 {
@@ -48,7 +54,7 @@ fn bt_misms<const N: usize>(wf_components: &WavefrontComponents<N>, score: i32, 
         return OFFSET_NULL as i64;
     }
     let m_ptr = wf_components.get_m_ptr(score as usize);
-    if m_ptr.is_null() {
+    if m_ptr.is_null() || unsafe { (*m_ptr).null } {
         return OFFSET_NULL as i64;
     }
     let wf = unsafe { &*m_ptr };
@@ -70,7 +76,7 @@ fn bt_ins1_open<const N: usize>(
         return OFFSET_NULL as i64;
     }
     let m_ptr = wf_components.get_m_ptr(score as usize);
-    if m_ptr.is_null() {
+    if m_ptr.is_null() || unsafe { (*m_ptr).null } {
         return OFFSET_NULL as i64;
     }
     let wf = unsafe { &*m_ptr };
@@ -92,7 +98,7 @@ fn bt_del1_open<const N: usize>(
         return OFFSET_NULL as i64;
     }
     let m_ptr = wf_components.get_m_ptr(score as usize);
-    if m_ptr.is_null() {
+    if m_ptr.is_null() || unsafe { (*m_ptr).null } {
         return OFFSET_NULL as i64;
     }
     let wf = unsafe { &*m_ptr };
@@ -299,7 +305,7 @@ fn bt_open1_pair<const N: usize>(
         return (OFFSET_NULL as i64, OFFSET_NULL as i64);
     }
     let m_ptr = wf_components.get_m_ptr(score as usize);
-    if m_ptr.is_null() {
+    if m_ptr.is_null() || unsafe { (*m_ptr).null } {
         return (OFFSET_NULL as i64, OFFSET_NULL as i64);
     }
     let wf = unsafe { &*m_ptr };
@@ -330,7 +336,7 @@ fn bt_affine_ins1_ext<const N: usize>(
         return OFFSET_NULL as i64;
     }
     let i1_ptr = wf_components.get_i1_ptr(score as usize);
-    if i1_ptr.is_null() {
+    if i1_ptr.is_null() || unsafe { (*i1_ptr).null } {
         return OFFSET_NULL as i64;
     }
     let wf = unsafe { &*i1_ptr };
@@ -352,7 +358,7 @@ fn bt_affine_del1_ext<const N: usize>(
         return OFFSET_NULL as i64;
     }
     let d1_ptr = wf_components.get_d1_ptr(score as usize);
-    if d1_ptr.is_null() {
+    if d1_ptr.is_null() || unsafe { (*d1_ptr).null } {
         return OFFSET_NULL as i64;
     }
     let wf = unsafe { &*d1_ptr };
@@ -618,7 +624,7 @@ fn bt_open2_pair<const N: usize>(
         return (OFFSET_NULL as i64, OFFSET_NULL as i64);
     }
     let m_ptr = wf_components.get_m_ptr(score as usize);
-    if m_ptr.is_null() {
+    if m_ptr.is_null() || unsafe { (*m_ptr).null } {
         return (OFFSET_NULL as i64, OFFSET_NULL as i64);
     }
     let wf = unsafe { &*m_ptr };
@@ -649,7 +655,7 @@ fn bt_affine_ins2_ext<const N: usize>(
         return OFFSET_NULL as i64;
     }
     let i2_ptr = wf_components.get_i2_ptr(score as usize);
-    if i2_ptr.is_null() {
+    if i2_ptr.is_null() || unsafe { (*i2_ptr).null } {
         return OFFSET_NULL as i64;
     }
     let wf = unsafe { &*i2_ptr };
@@ -671,7 +677,7 @@ fn bt_affine_del2_ext<const N: usize>(
         return OFFSET_NULL as i64;
     }
     let d2_ptr = wf_components.get_d2_ptr(score as usize);
-    if d2_ptr.is_null() {
+    if d2_ptr.is_null() || unsafe { (*d2_ptr).null } {
         return OFFSET_NULL as i64;
     }
     let wf = unsafe { &*d2_ptr };

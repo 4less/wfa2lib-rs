@@ -998,3 +998,104 @@ fn test_reused_aligner_after_far_diagonal_range() {
     assert_eq!(reused.cigar().to_string_rle(true), expected_cigar);
     assert!(reused.cigar().check_alignment(&p2, &t2).is_ok());
 }
+
+/// A CIGAR (possibly partial) must agree with the sequences: every M is a
+/// match, every X a mismatch, and it stays within both sequences.
+fn cigar_consistent(ops: &[u8], pattern: &[u8], text: &[u8]) -> bool {
+    let (mut v, mut h) = (0usize, 0usize);
+    for &op in ops {
+        match op {
+            b'M' | b'X' => {
+                if v >= pattern.len() || h >= text.len() || (op == b'M') != (pattern[v] == text[h]) {
+                    return false;
+                }
+                v += 1;
+                h += 1;
+            }
+            b'I' => h += 1,
+            b'D' => v += 1,
+            _ => return false,
+        }
+    }
+    v <= pattern.len() && h <= text.len()
+}
+
+/// Gap-affine 2-piece with a static band over the C test set: the band forces
+/// scores past the per-score arrays' worst-case bound (heap overflow before).
+#[test]
+fn test_affine2p_band_beyond_score_bound() {
+    let pairs = parse_sequences("WFA2-lib/tests/wfa.utest.seq");
+    let mut aligner = Affine2pAligner::new(WavefrontPenalties::new_affine2p(Affine2pPenalties {
+        match_: 0,
+        mismatch: 4,
+        gap_opening1: 6,
+        gap_extension1: 2,
+        gap_opening2: 24,
+        gap_extension2: 1,
+    }));
+    aligner.set_alignment_scope(AlignmentScope::ComputeAlignment);
+    aligner.set_heuristic(HeuristicStrategy::BandedStatic { min_k: -10, max_k: 10 });
+    for (p, t) in &pairs {
+        aligner.align_end2end(p, t);
+        assert!(cigar_consistent(aligner.cigar().operations_slice(), p, t));
+    }
+}
+
+/// A band that excludes the end diagonal makes the end unreachable while the
+/// wavefront never empties: the alignment must stop (it ran forever before).
+#[test]
+fn test_band_excluding_end_terminates() {
+    let p = b"TGCACCCTAGATAGATTATGTTTCGCAGTATCTTAATACGAATAAAGATGCGAACGTGGAGGTGTGGGGAGGAACCAACATAGTTCTGACCTATCCTCTTCTACCGACCGGGT";
+    let t = b"TGCAACTAGATAGATTATGTTCGCAGTATCTTAATACGAATAAGATGCGAACGTGGGGTGTGGAGGAACCAACATGACTGCAATATCTCACCTACCGGGT";
+    for scope in [AlignmentScope::ComputeAlignment, AlignmentScope::ComputeScore] {
+        let mut aligner = EditAligner::new(WavefrontPenalties::new_edit());
+        aligner.set_alignment_scope(scope);
+        aligner.set_heuristic(HeuristicStrategy::BandedStatic { min_k: -10, max_k: 10 });
+        aligner.align_end2end(p, t);
+        assert_ne!(aligner.status(), wfa2lib_rs::aligner::AlignStatus::Completed);
+    }
+}
+
+/// X-drop prunes whole wavefronts (flagged null); the compute step reads them
+/// as null, so the backtrace must not take them as a source (it emitted
+/// operations the alignment never had).
+#[test]
+fn test_xdrop_backtrace_consistent() {
+    let pairs: [(&[u8], &[u8]); 2] = [
+        (b"AAGAGAGTGACGCCGGTGATTGGTCCTCGGGTGATCCGCTGCCTTAGGGGGGCACAGCAACGGACTAGAGTAACCAACGTTACCTCTACGATCTAGGACTG",
+         b"AAGAGAGTGAAGCCGGTGATTGGTCCTCGGGTGATCCGCTGCCTTAGGGGGCACAGGAACGGACTAGAGTAACCAACGTTACCCTGACGATCTAGGACTG"),
+        (b"ATCCCGCCGTAAAATTAGTTGAACGACCACTACCGGTTGTTTAAATAGGACTCTGCCTGGTTAACAACGTCGTGTTTGGTTACTAGAAAGTTGAAAAA",
+         b"ATCCCGCCGTACAAATAGTTGAACGACCACTACCGGTTTGTTTAAATAGGACTCTGCCTGGTGTAACAACGTCGTGTTTGGTTGCTAGAAAGTTGAAAAA"),
+    ];
+    let penalties = AffinePenalties { match_: 0, mismatch: 3, gap_opening: 1, gap_extension: 4 };
+    let mut aligner = AffineAligner::new(WavefrontPenalties::new_affine(penalties.clone()));
+    aligner.set_alignment_scope(AlignmentScope::ComputeAlignment);
+    aligner.set_heuristic(HeuristicStrategy::XDrop { xdrop: 50, steps_between_cutoffs: 1 });
+    for (p, t) in pairs {
+        let score = aligner.align_end2end(p, t);
+        let cigar = aligner.cigar();
+        assert!(cigar_consistent(cigar.operations_slice(), p, t));
+        assert_eq!(cigar.score_gap_affine(&penalties), -score);
+    }
+}
+
+/// Z-drop: the alignment ends at the best position seen; score-only mode must
+/// report the score of that same partial alignment.
+#[test]
+fn test_zdrop_score_only_matches_cigar() {
+    let p = b"ACCGCGATGGTGATATCGATGTGGGTTACGTGGAAATAACGAATTATATCACTTAGCATTTGCGGGGGTTAGTAGTCCAAGAGGTGAGTAGGGCACGTTC";
+    let t = b"AACGCGATGGTGATATCGATGTGGGTTACGTGGAAATAACGAATTATATAACTTAGGATTTGCGGGGGTTAGTAGTCCAAGAGGTGAGTAGGGAACGTTC";
+    let penalties = AffinePenalties { match_: -2, mismatch: 3, gap_opening: 1, gap_extension: 4 };
+    let heuristic = HeuristicStrategy::ZDrop { zdrop: 50, steps_between_cutoffs: 1 };
+    let mut full = AffineAligner::new(WavefrontPenalties::new_affine(penalties.clone()));
+    full.set_alignment_scope(AlignmentScope::ComputeAlignment);
+    full.set_heuristic(heuristic.clone());
+    full.align_end2end(p, t);
+    assert!(cigar_consistent(full.cigar().operations_slice(), p, t));
+    let mut score_only = AffineAligner::new(WavefrontPenalties::new_affine(penalties));
+    score_only.set_alignment_scope(AlignmentScope::ComputeScore);
+    score_only.set_heuristic(heuristic);
+    score_only.align_end2end(p, t);
+    assert_eq!(score_only.cigar().end_v, full.cigar().end_v);
+    assert_eq!(score_only.cigar().end_h, full.cigar().end_h);
+}

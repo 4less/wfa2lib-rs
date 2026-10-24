@@ -295,6 +295,21 @@ impl WavefrontPenalties {
         }
     }
 
+    /// Upper bound on the (internal) score of any alignment path between
+    /// sequences of these lengths: every operation costs at most the largest
+    /// single-operation penalty and a path has at most `plen + tlen`
+    /// operations. A search that passes this score without reaching the end
+    /// can never reach it (a heuristic made it unreachable).
+    pub fn max_path_score(&self, plen: i32, tlen: i32) -> i32 {
+        let max_op = self
+            .mismatch
+            .max(self.gap_opening1)
+            .max(self.gap_opening1 + self.gap_extension1)
+            .max(self.gap_opening2 + self.gap_extension2)
+            .max(1) as i64;
+        ((plen as i64 + tlen as i64) * max_op).min(i32::MAX as i64 - 1) as i32
+    }
+
     /// Compute SW-score equivalent using Eizenga's formula.
     /// sw_score = (swg_match * (plen + tlen) - wf_score) / 2
     pub fn wf_score_to_sw_score(&self, plen: i32, tlen: i32, wf_score: i32) -> i32 {

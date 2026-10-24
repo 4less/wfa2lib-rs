@@ -168,19 +168,27 @@ impl<const N: usize> WavefrontComponents<N> {
     }
 
     /// Resize the wavefront components for new sequence lengths.
+    ///
+    /// `max_alignment_steps` bounds the score the alignment can reach (the
+    /// loop stops at it), so the per-score arrays need no more than
+    /// `max_alignment_steps + 1` slots in non-modular mode.
     pub fn resize(
         &mut self,
         max_pattern_length: i32,
         max_text_length: i32,
         penalties: &WavefrontPenalties,
+        max_alignment_steps: i32,
     ) {
-        let (max_score_scope, num_wavefronts) = Self::compute_dimensions(
+        let (max_score_scope, mut num_wavefronts) = Self::compute_dimensions(
             penalties,
             max_pattern_length,
             max_text_length,
             self.memory_modular,
         );
         self.max_score_scope = max_score_scope;
+        if !self.memory_modular && max_alignment_steps < i32::MAX {
+            num_wavefronts = num_wavefronts.min(max_alignment_steps as usize + 1);
+        }
 
         if num_wavefronts > self.num_wavefronts {
             self.num_wavefronts = num_wavefronts;

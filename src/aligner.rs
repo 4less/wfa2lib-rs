@@ -357,7 +357,7 @@ impl<const N: usize> WavefrontAligner<N> {
         self.wf_components.memory_modular = score_only;
 
         // Resize components for sequence dimensions
-        self.wf_components.resize(plen, tlen, &self.penalties);
+        self.wf_components.resize(plen, tlen, &self.penalties, self.max_alignment_steps);
 
         // Slab mode as in C: modular (score-only) reuses wavefronts of a common
         // length; CIGAR mode keeps every wavefront, sized to its own range.
@@ -1686,7 +1686,7 @@ impl<const N: usize> WavefrontAligner<N> {
             self.cigar.resize(max_ops);
         }
 
-        self.wf_components.resize(plen, tlen, &self.penalties);
+        self.wf_components.resize(plen, tlen, &self.penalties, self.max_alignment_steps);
         let mode = if self.wf_components.memory_modular { SlabMode::Reuse } else { SlabMode::Tight };
         self.wavefront_slab.set_mode(mode);
         if mode == SlabMode::Reuse { self.wavefront_slab.clear(); } else { self.wavefront_slab.recycle(); }

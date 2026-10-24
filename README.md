@@ -48,6 +48,28 @@ Benchmarked against the C reference implementation (WFA2-lib), 50,000 sequence p
 
 Ratio < 1.0 means Rust is faster. Key optimizations include hand-written AVX2/NEON SIMD compute kernels (8 or 4 diagonals/iteration) with software prefetching, pre-centered wavefront offset pointers (matching C's `offsets = offsets_mem - min_lo` pattern), separate per-component wavefront arrays for optimal cache stride, arena bump allocation with cache coloring to eliminate L1 conflict misses, conditional kernel dispatch (affine fallback when O2/E2 inputs are null), wavefront reuse between alignments, and blockwise 64-bit sequence extension.
 
+### flexalign-shaped workloads
+
+`examples/flexalign_bench.rs` replays the aligner configuration used by
+[flexalign](https://github.com/4less/flexalign): gap-affine (0,10,12,3), CIGAR
+output, WF-adaptive (10,50,1), an ANI-derived max-score abort, and ends-free
+dovetail/extension spans on 150 bp reads. `bench/flexalign_ab.py` A/B-measures a
+candidate build against a baseline and writes `bench/flexalign_report.html`
+from `bench/flexalign_history.jsonl`. Relative to commit `eb936d4` (same
+machine, AMD Zen 5, identical harness), the current code runs at:
+
+| Workload | Time per pair | Ratio |
+|---|---|---|
+| 150 bp end-to-end, 2% divergence | 1.74 µs | **0.67x** |
+| 150 bp, aborted by max score (15% divergence) | 13.5 µs | **0.53x** |
+| 150 bp dovetail (ends-free both sides) | 4.9 µs | **0.58x** |
+| 150 bp one-sided extension (ends-free) | 4.8 µs | **0.57x** |
+| 1 kb end-to-end, 5% divergence | 72 µs | **0.56x** |
+
+Outputs are byte-identical to the earlier version and to WFA2-lib's reference
+outputs (`tests/wfa_utest.sh`). Per-aligner memory for 150 bp CIGAR alignments
+went from ~1.9 MB to ~0.3 MB.
+
 ## Building
 
 Requires Rust 1.91+ (edition 2024).

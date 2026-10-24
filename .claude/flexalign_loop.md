@@ -80,6 +80,18 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 
 - it24 (v24, DROPPED, 1.006x): skip the compute at score == max_steps + lazy cutoff scratch buffer: neutral/noise. (C computes then checks too.)
 
+- it25: final validation (212+18 cargo tests, 60 C-reference cases OK). Direct A/B final (v23, 851f3fb) vs v0 (eb936d4) with the same harness:
+  geo-mean 0.592x; 150bp e2e 0.67x, drop 0.53x, dovetail 0.58x, extension 0.57x, 1k 5% 0.56x, 1k 0.5% 0.70x. Checksums equal v0's.
+  Memory per aligner (150bp, base + growth): v0 ~0.3 MB base + 1.63 MB growth -> 0.09 MB + 0.15-0.22 MB.
+
+## Status: LOOP FINISHED (25 iterations, goal 50% reached at it8). Cron job 58f5e5de cancelled.
+
+## Taken versions (chronological)
+v1 cutoff without distance buffer; v2 null-fill at allocation (no init_ends); v3 AVX2 fill + pad-only; v4 one-pass ends-free termination;
+v5 kernel without scalar tail; v6 32-byte extend compare + AVX2 min pass; v7 wavefronts sized by need (memory); v8 trim within input hull;
+v9 kernel inlined; v10 AVX-512VL bounds check + 3-in-1 alloc; v11 vector reduce scan; v15 begin-free init fill+ramp; v17 one pad-fill dispatch;
+v18 compute step specialised on memory mode; v21 arrays capped by max steps (memory); v22 smaller initial arena (memory); v23 round-to-16 sizes (memory).
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

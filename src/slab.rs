@@ -135,6 +135,38 @@ impl WavefrontSlab {
         wf
     }
 
+    /// `N` output wavefronts for the same range in one call (see
+    /// `allocate_output_ptr`): Tight mode takes the next `N` recycled
+    /// wavefronts in one scan.
+    #[inline(always)]
+    pub fn allocate_output_ptrs<const N: usize>(&mut self, min_lo: i32, max_hi: i32, lo: i32, hi: i32) -> [*mut Wavefront; N] {
+        let wf_length = wavefront_length(min_lo, max_hi);
+        let mut out = [std::ptr::null_mut(); N];
+        if self.slab_mode == SlabMode::Tight && self.recycle_next + N <= self.recycle_end {
+            let mut ok = true;
+            for (i, slot) in out.iter_mut().enumerate() {
+                let wf = unsafe { *self.wavefronts.get_unchecked(self.recycle_next + i) };
+                ok &= unsafe { (*wf).wf_elements_allocated } >= wf_length;
+                *slot = wf;
+            }
+            if ok {
+                self.recycle_next += N;
+                self.num_handed_out += N;
+                for &wf in &out {
+                    unsafe {
+                        (*wf).status = WavefrontStatus::Busy;
+                        (*wf).init_output(min_lo, max_hi, lo, hi);
+                    }
+                }
+                return out;
+            }
+        }
+        for slot in out.iter_mut() {
+            *slot = self.allocate_output_ptr(min_lo, max_hi, lo, hi);
+        }
+        out
+    }
+
     /// Hand out a busy wavefront with at least `wf_length` elements; the
     /// caller initializes it.
     #[inline(always)]

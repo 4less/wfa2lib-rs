@@ -246,9 +246,17 @@ unsafe fn compute_affine_idm_avx2(
 
     let v_one = _mm256_set1_epi32(1);
     let v_null = _mm256_set1_epi32(OFFSET_NULL);
-    let v_sign = _mm256_set1_epi32(i32::MIN); // for unsigned compare
-    let v_tlen_biased = _mm256_xor_si256(_mm256_set1_epi32(text_length), v_sign);
-    let v_plen_biased = _mm256_xor_si256(_mm256_set1_epi32(pattern_length), v_sign);
+    #[cfg(target_feature = "avx512vl")]
+    let (v_tlen, v_plen) = (_mm256_set1_epi32(text_length), _mm256_set1_epi32(pattern_length));
+    #[cfg(not(target_feature = "avx512vl"))]
+    let (v_sign, v_tlen_biased, v_plen_biased) = {
+        let v_sign = _mm256_set1_epi32(i32::MIN); // for unsigned compare
+        (
+            v_sign,
+            _mm256_xor_si256(_mm256_set1_epi32(text_length), v_sign),
+            _mm256_xor_si256(_mm256_set1_epi32(pattern_length), v_sign),
+        )
+    };
     let lanes = _mm256_set_epi32(7, 6, 5, 4, 3, 2, 1, 0);
 
     // One block of 8 diagonals [k, k+8) from already-loaded inputs.
@@ -261,12 +269,22 @@ unsafe fn compute_affine_idm_avx2(
             let v_misms = _mm256_add_epi32($misms_k, v_one);
             let v_m = _mm256_max_epi32(v_d1, _mm256_max_epi32(v_misms, v_i1));
             // Bounds check: unsigned h > tlen || v > plen → OFFSET_NULL
-            let v_h_biased = _mm256_xor_si256(v_m, v_sign);
-            let v_v_biased = _mm256_xor_si256(_mm256_sub_epi32(v_m, v_k), v_sign);
-            let h_oob = _mm256_cmpgt_epi32(v_h_biased, v_tlen_biased);
-            let v_oob = _mm256_cmpgt_epi32(v_v_biased, v_plen_biased);
-            let oob = _mm256_or_si256(h_oob, v_oob);
-            let v_m_final = _mm256_blendv_epi8(v_m, v_null, oob);
+            #[cfg(target_feature = "avx512vl")]
+            let v_m_final = {
+                // Unsigned compares straight to a mask, one mask blend.
+                let h_oob = _mm256_cmpgt_epu32_mask(v_m, v_tlen);
+                let v_oob = _mm256_cmpgt_epu32_mask(_mm256_sub_epi32(v_m, v_k), v_plen);
+                _mm256_mask_blend_epi32(h_oob | v_oob, v_m, v_null)
+            };
+            #[cfg(not(target_feature = "avx512vl"))]
+            let v_m_final = {
+                let v_h_biased = _mm256_xor_si256(v_m, v_sign);
+                let v_v_biased = _mm256_xor_si256(_mm256_sub_epi32(v_m, v_k), v_sign);
+                let h_oob = _mm256_cmpgt_epi32(v_h_biased, v_tlen_biased);
+                let v_oob = _mm256_cmpgt_epi32(v_v_biased, v_plen_biased);
+                let oob = _mm256_or_si256(h_oob, v_oob);
+                _mm256_blendv_epi8(v_m, v_null, oob)
+            };
             _mm256_storeu_si256(m_curr.offset(k as isize) as *mut __m256i, v_m_final);
             _mm256_storeu_si256(i1_curr.offset(k as isize) as *mut __m256i, v_i1);
             _mm256_storeu_si256(d1_curr.offset(k as isize) as *mut __m256i, v_d1);

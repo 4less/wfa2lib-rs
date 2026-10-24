@@ -852,15 +852,18 @@ impl<const N: usize> WavefrontAligner<N> {
         // Allocate or reuse 3 output wavefronts using pre-computed slot.
         let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
         let modular = self.wf_components.memory_modular;
-        macro_rules! out_slot_wf {
-            ($comp:ident) => {{
-                let old = if modular { self.wf_components.$comp(out_slot) } else { WF_PTR_NONE };
-                self.alloc_output(old, eff_lo, eff_hi, lo, hi)
-            }}
-        }
-        let m_curr_ptr = crate::phase!(4, out_slot_wf!(get_m_ptr_slot));
-        let i1_curr_ptr = crate::phase!(4, out_slot_wf!(get_i1_ptr_slot));
-        let d1_curr_ptr = crate::phase!(4, out_slot_wf!(get_d1_ptr_slot));
+        let (m_curr_ptr, i1_curr_ptr, d1_curr_ptr) = if modular {
+            macro_rules! out_slot_wf {
+                ($comp:ident) => {{
+                    let old = self.wf_components.$comp(out_slot);
+                    self.alloc_output(old, eff_lo, eff_hi, lo, hi)
+                }}
+            }
+            (out_slot_wf!(get_m_ptr_slot), out_slot_wf!(get_i1_ptr_slot), out_slot_wf!(get_d1_ptr_slot))
+        } else {
+            let [m, i1, d1] = self.wavefront_slab.allocate_output_ptrs::<3>(eff_lo, eff_hi, lo, hi);
+            (m, i1, d1)
+        };
 
         // Compute kernel using raw pointers for multi-borrow
         unsafe {

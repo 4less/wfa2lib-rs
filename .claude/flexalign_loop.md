@@ -78,6 +78,8 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 
 - it23 (v23, taken for memory, speed 0.996x): Tight sizing rounded to 16 (min 48). 1.25x headroom variant: -30% heap on short reads but +20% on 1k 5% (recycle misses); not taken.
 
+- it24 (v24, DROPPED, 1.006x): skip the compute at score == max_steps + lazy cutoff scratch buffer: neutral/noise. (C computes then checks too.)
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

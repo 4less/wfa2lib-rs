@@ -55,6 +55,8 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 - it14 (v14, DROPPED): 64-char extend compare (zmm, and 2x ymm): +4-5% slower on drop/dovetail. Extend's hot branch is load-bound; 32B compare stays.
   Dovetail profile: ends-free extend = 46% of cycles (43 diagonals/step), compute 26%, cutoff 11%, init_alignment 2.4%.
 
+- it15 (v15, taken, 0.989x vs v11, 0.631x vs v0): begin-free init as zero fill + identity ramp with exclusive ranges (ends-free 0.965x). 150bp e2e +2% is noise (unchanged code path).
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

@@ -400,14 +400,15 @@ impl<const N: usize> WavefrontAligner<N> {
         let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
         let wf_ptr = self.wavefront_slab.allocate_ptr(eff_lo, eff_hi);
         unsafe {
-            (*wf_ptr).set_offset(0, 0);
-            // Text begin-free: (h,0) on diagonal k=h with offset h
-            for h in 1..=text_begin_free {
-                (*wf_ptr).set_offset(h, h);
-            }
-            // Pattern begin-free: (0,v) on diagonal k=-v with offset 0
-            for v in 1..=pattern_begin_free {
-                (*wf_ptr).set_offset(-v, 0);
+            // Begin-free diagonals as two contiguous runs: a zero fill for
+            // (0,v) on k=-v (pattern begin-free), and an identity ramp for
+            // (h,0) on k=h (text begin-free). Exclusive ranges: inclusive
+            // ones carry an extra exhaustion check per iteration.
+            let base = (*wf_ptr).offsets_centered_mut_ptr();
+            std::slice::from_raw_parts_mut(base.offset(-(pattern_begin_free as isize)), pattern_begin_free as usize + 1)
+                .fill(0);
+            for h in 1..text_begin_free + 1 {
+                *base.offset(h as isize) = h;
             }
             (*wf_ptr).set_limits(lo, hi);
         }

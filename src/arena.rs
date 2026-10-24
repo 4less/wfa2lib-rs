@@ -97,7 +97,16 @@ impl ByteArena {
                 return chunk_ptr;
             }
         }
-        let new_cap = size_aligned.max(self.default_chunk_size);
+        // The first chunks stay at the default size (short alignments need a
+        // few of them at most); after that chunks double, up to 1 MB, so that
+        // mid-sized wavefronts do not waste a large fraction of each chunk.
+        let last_cap = self.chunks.last().map(|&(_, c)| c).unwrap_or(self.default_chunk_size);
+        let grown = if self.chunks.len() < 4 {
+            self.default_chunk_size
+        } else {
+            (last_cap.saturating_mul(2)).min(1 << 20).max(self.default_chunk_size)
+        };
+        let new_cap = size_aligned.max(grown);
         self.add_chunk(new_cap);
         self.current_chunk = self.chunks.len() - 1;
         self.cursor = size_aligned;

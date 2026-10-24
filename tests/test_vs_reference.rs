@@ -948,3 +948,53 @@ fn test_packed2bits_affine_scores() {
         );
     }
 }
+
+/// Regression: a previous alignment with a far-off diagonal range re-centres the
+/// null wavefront; a following small alignment must not read outside it
+/// (the result must equal a fresh aligner's). Exercised with WF-adaptive, where
+/// stale reads change pruning.
+#[test]
+fn test_reused_aligner_after_far_diagonal_range() {
+    use wfa2lib_rs::aligner::AlignmentScope;
+    let penalties = WavefrontPenalties::new_affine(AffinePenalties {
+        match_: 0,
+        mismatch: 3,
+        gap_opening: 1,
+        gap_extension: 4,
+    });
+    let heuristic = HeuristicStrategy::WfAdaptive {
+        min_wavefront_length: 10,
+        max_distance_threshold: 50,
+        steps_between_cutoffs: 1,
+    };
+    // Deterministic pseudo-random sequences.
+    let mut x: u64 = 0x9E3779B97F4A7C15;
+    let mut next = || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        b"ACGT"[(x % 4) as usize]
+    };
+    let short: Vec<u8> = (0..40).map(|_| next()).collect();
+    let long: Vec<u8> = (0..2000).map(|_| next()).collect();
+    let p2: Vec<u8> = (0..300).map(|_| next()).collect();
+    let mut t2 = p2.clone();
+    for i in (7..300).step_by(37) {
+        t2[i] = if t2[i] == b'A' { b'C' } else { b'A' };
+    }
+
+    let mut fresh = AffineAligner::new(penalties.clone());
+    fresh.set_alignment_scope(AlignmentScope::ComputeAlignment);
+    fresh.set_heuristic(heuristic.clone());
+    let expected_score = fresh.align_end2end(&p2, &t2);
+    let expected_cigar = fresh.cigar().to_string_rle(true);
+
+    let mut reused = AffineAligner::new(penalties);
+    reused.set_alignment_scope(AlignmentScope::ComputeAlignment);
+    reused.set_heuristic(heuristic);
+    reused.align_end2end(&short, &long); // diagonals up to ~1960: null range re-centred far away
+    let score = reused.align_end2end(&p2, &t2);
+    assert_eq!(score, expected_score);
+    assert_eq!(reused.cigar().to_string_rle(true), expected_cigar);
+    assert!(reused.cigar().check_alignment(&p2, &t2).is_ok());
+}

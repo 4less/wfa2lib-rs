@@ -92,6 +92,27 @@ v5 kernel without scalar tail; v6 32-byte extend compare + AVX2 min pass; v7 wav
 v9 kernel inlined; v10 AVX-512VL bounds check + 3-in-1 alloc; v11 vector reduce scan; v15 begin-free init fill+ramp; v17 one pad-fill dispatch;
 v18 compute step specialised on memory mode; v21 arrays capped by max steps (memory); v22 smaller initial arena (memory); v23 round-to-16 sizes (memory).
 
+## Validation round (2026-10-24, after the 25 iterations)
+Tooling: WFA2-lib C built in ./WFA2-lib (make lib_wfa; make -C tools/align_benchmark); tests/diff_vs_c.sh = 1710-config
+differential matrix vs C (5 datasets x 7 penalty sets x 3 modes x 4 spans x 6 heuristics). Scratch copy with ROOT/R_BIN
+env overrides was used to run it for other binaries. Memory-poison debugging: fill arena chunks on reset/new (env hook),
+leak+poison or mprotect(PROT_NONE) old heap buffers on Wavefront::resize, then gdb for the faulting backtrace.
+- Per-commit sweep: all 17 taken commits pass 230 cargo tests + 60 C-reference cases.
+- flexalign's exact config (0,10,12,3; WF-adaptive 10/50/1; ends-free spans; max-steps 60/151/1501): 96/96 identical to C.
+- REGRESSION found & fixed (v24): resize_null_victim proposes [lo-inc/2, hi+inc/2]; for a 1-wide wavefront inc/2 = 0 so lo-1 is
+  outside the (reallocated) null wavefront -> kernel reads one element before the buffer (freed memory). Same arithmetic in C
+  (latent there too); reachable in practice only after the range was re-centred far away, which v22's +-256 initial range made
+  common (utest pair 263: 600 vs 1200 bp, then pair 264). Fix: range always covers [lo-1, hi+1], never shrinks. Output-neutral.
+  Showed up as 10 WF-adaptive utest configs differing from C/v0 (and failing --check).
+- MEMORY REGRESSION found & fixed (v24): 1.5x headroom on every Tight allocation (v7) + 64 KB fixed chunks (v22) gave 1.8x v0's
+  peak RSS on utest CIGAR configs (affine2p ends-free 2.4 -> 4.2 GB). Now headroom only <= 1024 elements and chunks grow
+  geometrically (64 KB .. 8 MB): peak RSS <= v0 everywhere measured; 150bp footprint unchanged.
+- Pre-existing differences vs C (also in v0, NOT from the loop; 649 of 1710 configs): mostly match-reward penalties (-2,3,1,4),
+  penalties 0,3,1,4, ends-free with only end-free, X/Z-drop, banded; 236 of them are Rust crashes (segfault 139 / abort 134) or
+  hangs (124) in v0 as well, e.g. gap-affine + banded-static on utest, X-drop on utest. Worth a separate bug-fixing effort.
+
+- v24 committed: 213+19 cargo tests, 60/60 C-reference, 1710-config matrix == v0's failure set, flexalign A/B 1.009x (noise). Best binary = v24.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

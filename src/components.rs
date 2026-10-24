@@ -203,14 +203,20 @@ impl<const N: usize> WavefrontComponents<N> {
     }
 
     /// Resize null and victim wavefronts if the diagonal range exceeds their bounds.
+    ///
+    /// The compute kernels read the null wavefront over `[lo-1, hi+1]`, so the
+    /// new range always includes that (C's `lo - wf_inc/2` leaves `lo-1` out
+    /// when the wavefront is one diagonal wide) and never shrinks below the
+    /// current range, which keeps every earlier reader in bounds. The null
+    /// wavefront's content is all null, so the range does not affect output.
     pub fn resize_null_victim(&mut self, lo: i32, hi: i32) {
         if lo - 1 < self.wavefront_null.wf_elements_init_min
             || hi + 1 > self.wavefront_null.wf_elements_init_max
         {
             let wf_len = wavefront_length(lo, hi);
             let wf_inc = (wf_len * 3) / 2;
-            let proposed_lo = lo - wf_inc / 2;
-            let proposed_hi = hi + wf_inc / 2;
+            let proposed_lo = (lo - wf_inc / 2 - 1).min(self.wavefront_null.wf_elements_init_min);
+            let proposed_hi = (hi + wf_inc / 2 + 1).max(self.wavefront_null.wf_elements_init_max);
             let proposed_length = wavefront_length(proposed_lo, proposed_hi);
 
             self.wavefront_victim.resize(proposed_length);
@@ -523,6 +529,25 @@ mod tests {
         comp.set_m_ptr(0, fake_ptr);
         comp.clear();
         assert!(comp.get_m_ptr(0).is_null());
+    }
+
+    #[test]
+    fn test_resize_null_victim_covers_kernel_reads() {
+        // Kernels read the null wavefront over [lo-1, hi+1]. After a resize
+        // that re-centres the range far away, a one-diagonal request must
+        // still be covered (C's arithmetic leaves lo-1 out for width 1).
+        let penalties = WavefrontPenalties::new_affine(crate::penalties::AffinePenalties {
+            match_: 0, mismatch: 4, gap_opening: 6, gap_extension: 2,
+        });
+        let mut comp = WavefrontComponents::<3>::new(10, 10, &penalties, false, false);
+        comp.resize_null_victim(900, 1100); // moves the range away from 0
+        comp.resize_null_victim(0, 0);
+        assert!(comp.wavefront_null.wf_elements_init_min <= -1);
+        assert!(comp.wavefront_null.wf_elements_init_max >= 1);
+        assert_eq!(comp.wavefront_null.get_offset(-1), crate::offset::OFFSET_NULL);
+        assert_eq!(comp.wavefront_null.get_offset(1), crate::offset::OFFSET_NULL);
+        // Never shrinks: the earlier range is still covered.
+        assert!(comp.wavefront_null.wf_elements_init_max >= 1101);
     }
 
     #[test]

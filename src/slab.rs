@@ -23,6 +23,8 @@ use crate::offset::wavefront_length;
 use crate::wavefront::{Wavefront, WavefrontStatus};
 
 const WF_SLAB_EXPAND_FACTOR: f32 = 1.5;
+/// Largest Tight-mode request that gets recycling headroom (see `tight_alloc_length`).
+const TIGHT_HEADROOM_MAX_LENGTH: i32 = 1024;
 
 /// Slab allocation strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -337,13 +339,20 @@ impl WavefrontSlab {
     // --- Internal ---
 
     /// Tight mode allocation size for a request of `wf_length` elements:
-    /// 50% headroom (so the next alignment's slightly wider wavefront can
-    /// recycle it), rounded up to 16 elements. Sizing by need instead of a
+    /// up to `TIGHT_HEADROOM_MAX_LENGTH`, 50% headroom (so the next
+    /// alignment's slightly wider wavefront can recycle it), rounded up to 16
+    /// elements; above that, the exact length rounded up to 16. Sizing by need instead of a
     /// fixed 1000 elements keeps memory proportional to the wavefronts and
     /// avoids placing every array at the same 4 KB page offset.
     #[inline(always)]
     fn tight_alloc_length(wf_length: i32) -> i32 {
-        ((wf_length + wf_length / 2 + 15) & !15).max(48)
+        if wf_length <= TIGHT_HEADROOM_MAX_LENGTH {
+            ((wf_length + wf_length / 2 + 15) & !15).max(48)
+        } else {
+            // Large wavefronts are allocated at their size (as C's tight mode):
+            // headroom there costs real memory for little recycling benefit.
+            (wf_length + 15) & !15
+        }
     }
 
     #[inline(always)]

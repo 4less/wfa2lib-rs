@@ -669,12 +669,97 @@ impl<const N: usize> WavefrontAligner<N> {
         p.is_null() || unsafe { (*p).null }
     }
 
+    /// `(lo, hi)` of an input for the output-range union, as C computes it:
+    /// a null input is the null wavefront, whose limits are `[1, -1]`.
+    #[inline(always)]
+    fn input_limits(p: *mut Wavefront) -> (i32, i32) {
+        if p.is_null() { (1, -1) } else { unsafe { ((*p).lo, (*p).hi) } }
+    }
+
     /// An input as C fetches it (`wavefront_compute_get_*wavefront`): a
     /// wavefront flagged null (e.g. fully pruned by a heuristic) reads as the
     /// all-null wavefront, never through its retained offsets.
     #[inline(always)]
     fn input(p: *mut Wavefront) -> *mut Wavefront {
         if Self::input_is_null(p) { WF_PTR_NONE } else { p }
+    }
+
+    /// Ends-free with a match reward (C's `wavefront_compute_endsfree_required`):
+    /// begin-free diagonals cannot all start at score 0, the `k`-th one enters
+    /// at score `k * (-match)`. Returns that `k` and which sides apply.
+    #[inline(always)]
+    fn endsfree_required(&self, score: i32) -> Option<(i32, bool, bool)> {
+        let m = self.penalties.match_;
+        if m == 0 || self.alignment_span != AlignmentSpan::EndsFree {
+            return None;
+        }
+        if self.text_begin_free == 0 && self.pattern_begin_free == 0 {
+            return None;
+        }
+        if score % (-m) != 0 {
+            return None;
+        }
+        let k = score / (-m);
+        let text = self.text_begin_free >= k;
+        let pattern = self.pattern_begin_free >= k;
+        if !text && !pattern { None } else { Some((k, text, pattern)) }
+    }
+
+    /// Output range widened to hold the begin-free diagonals entering at this
+    /// score (C's `wavefront_compute_endsfree_limits`).
+    #[inline(always)]
+    fn endsfree_widen(ef: Option<(i32, bool, bool)>, lo: i32, hi: i32) -> (i32, i32) {
+        match ef {
+            Some((k, text, pattern)) => (if pattern { lo.min(-k) } else { lo }, if text { hi.max(k) } else { hi }),
+            None => (lo, hi),
+        }
+    }
+
+    /// M-wavefront for a null step that still has begin-free diagonals
+    /// entering (C's `wavefront_compute_endsfree_allocate_null`).
+    fn endsfree_allocate_null(&mut self, (k, text, pattern): (i32, bool, bool)) -> *mut Wavefront {
+        let (lo, hi) = match (text, pattern) {
+            (true, true) => (-k, k),
+            (true, false) => (k, k),
+            (false, true) => (-k, -k),
+            (false, false) => (0, 0),
+        };
+        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
+        let wf = self.wavefront_slab.allocate_ptr(eff_lo, eff_hi); // all null
+        unsafe {
+            if text { (*wf).set_offset(k, k); }       // (h=k, v=0)
+            if pattern { (*wf).set_offset(-k, 0); }   // (h=0, v=k)
+            (*wf).set_limits(lo, hi);
+        }
+        wf
+    }
+
+    /// Insert the begin-free diagonals entering at this score into a computed
+    /// M-wavefront, before trimming (C's `wavefront_compute_endsfree_init`).
+    /// The wavefront was allocated over the widened range, so extending its
+    /// limits stays within the nulled pads.
+    unsafe fn endsfree_init(wf: *mut Wavefront, (k, text, pattern): (i32, bool, bool)) {
+        let w = unsafe { &mut *wf };
+        let (lo, hi) = (w.lo, w.hi);
+        if text {
+            if hi >= k {
+                if w.get_offset(k) <= k { w.set_offset(k, k); }
+            } else {
+                for j in hi + 1..k { w.set_offset(j, OFFSET_NULL); }
+                w.set_offset(k, k);
+                w.hi = k;
+            }
+        }
+        if pattern {
+            let nk = -k;
+            if lo <= nk {
+                if w.get_offset(nk) <= 0 { w.set_offset(nk, 0); }
+            } else {
+                w.set_offset(nk, 0);
+                for j in nk + 1..lo { w.set_offset(j, OFFSET_NULL); }
+                w.lo = nk;
+            }
+        }
     }
 
     /// Compute the next wavefront for edit/indel distance.
@@ -746,17 +831,11 @@ impl<const N: usize> WavefrontAligner<N> {
         };
 
         // Get effective lo/hi from input wavefronts
-        let (misms_lo, misms_hi) = if !misms_ptr.is_null() {
-            unsafe { ((*misms_ptr).lo, (*misms_ptr).hi) }
-        } else {
-            (0, -1) // empty range
-        };
-        let (gap_lo, gap_hi) = if !gap_ptr.is_null() {
-            unsafe { ((*gap_ptr).lo, (*gap_ptr).hi) }
-        } else {
-            (0, -1) // empty range
-        };
+        // Range union as C's wavefront_compute_limits_input (null inputs count as [1, -1])
+        let (misms_lo, misms_hi) = Self::input_limits(misms_ptr);
+        let (gap_lo, gap_hi) = Self::input_limits(gap_ptr);
 
+        let ef = self.endsfree_required(score);
         // All inputs null: a null step (C's wavefront_compute_linear).
         if misms_ptr.is_null() && gap_ptr.is_null() {
             self.num_null_steps += 1;
@@ -764,7 +843,8 @@ impl<const N: usize> WavefrontAligner<N> {
                 let slot = self.wf_components.slot_of(score_curr);
                 self.wavefront_slab.free_ptr(self.wf_components.get_m_ptr_slot(slot));
             }
-            self.wf_components.set_m_ptr(score_curr, WF_PTR_NONE);
+            let m = match ef { Some(ef) => self.endsfree_allocate_null(ef), None => WF_PTR_NONE };
+            self.wf_components.set_m_ptr(score_curr, m);
             return;
         }
         self.num_null_steps = 0;
@@ -783,7 +863,8 @@ impl<const N: usize> WavefrontAligner<N> {
         // Inputs read as null outside [lo, hi]: see `Wavefront::init`.
 
         // Allocate or reuse output wavefront
-        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
+        let (w_lo, w_hi) = Self::endsfree_widen(ef, lo, hi);
+        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(w_lo, w_hi);
         let old = if self.wf_components.memory_modular { self.wf_components.get_m_ptr(score_curr) } else { WF_PTR_NONE };
         let curr_ptr = self.alloc_output(old, eff_lo, eff_hi, lo, hi);
         unsafe { (*curr_ptr).set_limits(lo, hi); }
@@ -809,7 +890,10 @@ impl<const N: usize> WavefrontAligner<N> {
         // Store in components
         self.wf_components.set_m_ptr(score_curr, curr_ptr);
 
-        // Trim ends
+        // Begin-free diagonals entering at this score (match reward), then trim
+        if let Some(ef) = ef {
+            unsafe { Self::endsfree_init(curr_ptr, ef) };
+        }
         compute::trim_ends(plen, tlen, unsafe { &mut *curr_ptr });
     }
 
@@ -851,25 +935,26 @@ impl<const N: usize> WavefrontAligner<N> {
         };
 
         // Compute effective lo/hi from pointers (no slab re-lookup)
-        let mut lo = i32::MAX;
-        let mut hi = i32::MIN;
-        unsafe {
-            if !ptr_m_misms.is_null() { lo = lo.min((*ptr_m_misms).lo);     hi = hi.max((*ptr_m_misms).hi);     }
-            if !ptr_m_open.is_null()  { lo = lo.min((*ptr_m_open).lo - 1);  hi = hi.max((*ptr_m_open).hi + 1);  }
-            if !ptr_i1_ext.is_null()  { lo = lo.min((*ptr_i1_ext).lo + 1);  hi = hi.max((*ptr_i1_ext).hi + 1);  }
-            if !ptr_d1_ext.is_null()  { lo = lo.min((*ptr_d1_ext).lo - 1);  hi = hi.max((*ptr_d1_ext).hi - 1);  }
-        }
+        // Range union as C's wavefront_compute_limits_input: every input takes
+        // part, a null one with the null wavefront's limits [1, -1].
+        let (mm_lo, mm_hi) = Self::input_limits(ptr_m_misms);
+        let (op_lo, op_hi) = Self::input_limits(ptr_m_open);
+        let (ie_lo, ie_hi) = Self::input_limits(ptr_i1_ext);
+        let (de_lo, de_hi) = Self::input_limits(ptr_d1_ext);
+        let mut lo = mm_lo.min(op_lo - 1).min(ie_lo + 1).min(de_lo - 1);
+        let mut hi = mm_hi.max(op_hi + 1).max(ie_hi + 1).max(de_hi - 1);
 
+        let ef = self.endsfree_required(score);
         // All inputs null: a null step (C's wavefront_compute_affine).
         if ptr_m_misms.is_null() && ptr_m_open.is_null() && ptr_i1_ext.is_null() && ptr_d1_ext.is_null() {
             self.num_null_steps += 1;
             if MODULAR {
                 self.free_output_wavefronts_affine(out_slot);
-            } else {
-                self.wf_components.set_m_ptr_slot(out_slot, WF_PTR_NONE);
-                self.wf_components.set_i1_ptr_slot(out_slot, WF_PTR_NONE);
-                self.wf_components.set_d1_ptr_slot(out_slot, WF_PTR_NONE);
             }
+            let m = match ef { Some(ef) => self.endsfree_allocate_null(ef), None => WF_PTR_NONE };
+            self.wf_components.set_m_ptr_slot(out_slot, m);
+            self.wf_components.set_i1_ptr_slot(out_slot, WF_PTR_NONE);
+            self.wf_components.set_d1_ptr_slot(out_slot, WF_PTR_NONE);
             return;
         }
         self.num_null_steps = 0;
@@ -898,7 +983,8 @@ impl<const N: usize> WavefrontAligner<N> {
         // Inputs read as null outside [lo, hi]: see `Wavefront::init`.
 
         // Allocate or reuse 3 output wavefronts using pre-computed slot.
-        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
+        let (w_lo, w_hi) = Self::endsfree_widen(ef, lo, hi);
+        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(w_lo, w_hi);
         let modular = MODULAR;
         let (m_curr_ptr, i1_curr_ptr, d1_curr_ptr) = if modular {
             macro_rules! out_slot_wf {
@@ -956,7 +1042,13 @@ impl<const N: usize> WavefrontAligner<N> {
             let (i1_lo, i1_hi) = (open_lo.min(i1e_lo).saturating_add(1), open_hi.min(i32::MAX - 1).max(i1e_hi.min(i32::MAX - 1)) + 1);
             let (d1_lo, d1_hi) = (open_lo.min(d1e_lo).max(i32::MIN + 1) - 1, open_hi.max(d1e_hi).saturating_sub(1));
             let (m_lo, m_hi) = (mm_lo.min(i1_lo).min(d1_lo), mm_hi.max(i1_hi).max(d1_hi));
-            compute::trim_ends_within(plen, tlen, &mut *m_curr_ptr, m_lo, m_hi);
+            if let Some(ef) = ef {
+                // Begin-free diagonals entered outside the input hull: full trim.
+                Self::endsfree_init(m_curr_ptr, ef);
+                compute::trim_ends(plen, tlen, &mut *m_curr_ptr);
+            } else {
+                compute::trim_ends_within(plen, tlen, &mut *m_curr_ptr, m_lo, m_hi);
+            }
             compute::trim_ends_within(plen, tlen, &mut *i1_curr_ptr, i1_lo, i1_hi);
             compute::trim_ends_within(plen, tlen, &mut *d1_curr_ptr, d1_lo, d1_hi);
         });
@@ -1005,18 +1097,18 @@ impl<const N: usize> WavefrontAligner<N> {
         let use_affine_kernel = !i2_active && !d2_active;
 
         // Compute effective lo/hi from pointers (no slab re-lookup)
-        let mut lo = i32::MAX;
-        let mut hi = i32::MIN;
-        unsafe {
-            if !ptr_m_misms.is_null() { lo = lo.min((*ptr_m_misms).lo);     hi = hi.max((*ptr_m_misms).hi);     }
-            if !ptr_m_open1.is_null() { lo = lo.min((*ptr_m_open1).lo - 1); hi = hi.max((*ptr_m_open1).hi + 1); }
-            if !ptr_m_open2.is_null() { lo = lo.min((*ptr_m_open2).lo - 1); hi = hi.max((*ptr_m_open2).hi + 1); }
-            if !ptr_i1_ext.is_null()  { lo = lo.min((*ptr_i1_ext).lo  + 1); hi = hi.max((*ptr_i1_ext).hi  + 1); }
-            if !ptr_i2_ext.is_null()  { lo = lo.min((*ptr_i2_ext).lo  + 1); hi = hi.max((*ptr_i2_ext).hi  + 1); }
-            if !ptr_d1_ext.is_null()  { lo = lo.min((*ptr_d1_ext).lo  - 1); hi = hi.max((*ptr_d1_ext).hi  - 1); }
-            if !ptr_d2_ext.is_null()  { lo = lo.min((*ptr_d2_ext).lo  - 1); hi = hi.max((*ptr_d2_ext).hi  - 1); }
-        }
+        // Range union as C's wavefront_compute_limits_input (null inputs count as [1, -1])
+        let (mm_lo, mm_hi) = Self::input_limits(ptr_m_misms);
+        let (o1_lo, o1_hi) = Self::input_limits(ptr_m_open1);
+        let (o2_lo, o2_hi) = Self::input_limits(ptr_m_open2);
+        let (i1_lo_, i1_hi_) = Self::input_limits(ptr_i1_ext);
+        let (i2_lo_, i2_hi_) = Self::input_limits(ptr_i2_ext);
+        let (d1_lo_, d1_hi_) = Self::input_limits(ptr_d1_ext);
+        let (d2_lo_, d2_hi_) = Self::input_limits(ptr_d2_ext);
+        let mut lo = mm_lo.min(o1_lo - 1).min(o2_lo - 1).min(i1_lo_ + 1).min(i2_lo_ + 1).min(d1_lo_ - 1).min(d2_lo_ - 1);
+        let mut hi = mm_hi.max(o1_hi + 1).max(o2_hi + 1).max(i1_hi_ + 1).max(i2_hi_ + 1).max(d1_hi_ - 1).max(d2_hi_ - 1);
 
+        let ef = self.endsfree_required(score);
         // All inputs null: a null step (C's wavefront_compute_affine2p).
         if ptr_m_misms.is_null() && ptr_m_open1.is_null() && ptr_m_open2.is_null()
             && ptr_i1_ext.is_null() && ptr_d1_ext.is_null() && ptr_i2_ext.is_null() && ptr_d2_ext.is_null()
@@ -1024,13 +1116,13 @@ impl<const N: usize> WavefrontAligner<N> {
             self.num_null_steps += 1;
             if self.wf_components.memory_modular {
                 self.free_output_wavefronts_affine2p(out_slot);
-            } else {
-                self.wf_components.set_m_ptr_slot(out_slot, WF_PTR_NONE);
-                self.wf_components.set_i1_ptr_slot(out_slot, WF_PTR_NONE);
-                self.wf_components.set_d1_ptr_slot(out_slot, WF_PTR_NONE);
-                self.wf_components.set_i2_ptr_slot(out_slot, WF_PTR_NONE);
-                self.wf_components.set_d2_ptr_slot(out_slot, WF_PTR_NONE);
             }
+            let m = match ef { Some(ef) => self.endsfree_allocate_null(ef), None => WF_PTR_NONE };
+            self.wf_components.set_m_ptr_slot(out_slot, m);
+            self.wf_components.set_i1_ptr_slot(out_slot, WF_PTR_NONE);
+            self.wf_components.set_d1_ptr_slot(out_slot, WF_PTR_NONE);
+            self.wf_components.set_i2_ptr_slot(out_slot, WF_PTR_NONE);
+            self.wf_components.set_d2_ptr_slot(out_slot, WF_PTR_NONE);
             return;
         }
         self.num_null_steps = 0;
@@ -1081,7 +1173,8 @@ impl<const N: usize> WavefrontAligner<N> {
         // Inputs read as null outside [lo, hi]: see `Wavefront::init`.
 
         // Allocate or reuse output wavefronts using pre-computed slot.
-        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
+        let (w_lo, w_hi) = Self::endsfree_widen(ef, lo, hi);
+        let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(w_lo, w_hi);
         let modular = self.wf_components.memory_modular;
         macro_rules! out_slot_wf {
             ($comp:ident) => {{
@@ -1179,6 +1272,9 @@ impl<const N: usize> WavefrontAligner<N> {
 
         // Trim the ends of all output wavefronts (C's wavefront_compute_process_ends)
         unsafe {
+            if let Some(ef) = ef {
+                Self::endsfree_init(m_curr_ptr, ef);
+            }
             compute::trim_ends(plen, tlen, &mut *m_curr_ptr);
             compute::trim_ends(plen, tlen, &mut *i1_curr_ptr);
             compute::trim_ends(plen, tlen, &mut *d1_curr_ptr);
@@ -1625,7 +1721,14 @@ impl<const N: usize> WavefrontAligner<N> {
         loop {
             // Always extend M wavefront (needed for correct propagation)
             let m_ptr = base.wf_components.get_m_ptr(score as usize);
-            if !m_ptr.is_null() {
+            if m_ptr.is_null() {
+                // As C's wavefront_extend_end2end: too many null steps means
+                // the end is unreachable (heuristics can cause this).
+                if base.num_null_steps > base.wf_components.max_score_scope as i32 {
+                    base.status = AlignStatus::EndUnreachable;
+                    break;
+                }
+            } else {
                 let wf = unsafe { &mut *m_ptr };
                 if base.sequences.mode == SequenceMode::Lambda {
                     extend::extend_matches_custom_end2end(&base.sequences, wf);

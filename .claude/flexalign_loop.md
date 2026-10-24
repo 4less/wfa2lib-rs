@@ -135,3 +135,14 @@ leak+poison or mprotect(PROT_NONE) old heap buffers on Wavefront::resize, then g
 - extend: check blockwise compare uses 64-bit; endsfree extend termination check per diagonal.
 - Heuristic min pass: verify LLVM vectorised it (perf annotate); otherwise hand AVX2.
 - Backtrace cost for CIGAR mode (backtrace_affine).
+
+- v25 final (committed): exact input-range union (null inputs as [1,-1], fixes xdrop pair 625), match-reward ends-free port
+  (wavefront_compute_endsfree_required/limits/init/allocate_null), ends-free termination order follows the build's SIMD lane
+  count (16 on AVX-512, 8 on AVX2), BiWFA base unreachable check when the M input is null.
+  Verification: 213+19 cargo tests, 60/60 C-reference, flexalign A/B 0.98x vs v24 (neutral; dovetail checksum changes by design,
+  scores unchanged), matrix vs C 1452 pass / 226 fail / 4 crashes, 0 regressions vs v0 (423 fixed).
+  Remaining: affine.m global/endsfree/extension (62), affine.p1 (26), band/bandadapt/zdrop on edit/indel/linear/affine (~100),
+  end-only ends-free ties (~30), 4 crashes affine2p+band(adapt) CIGAR on short_e20/utest, BiWFA+heuristics diffs (12).
+  Reports: bench/flexalign_final_report.html (figures), bench/flexalign_report.html (A/B history).
+
+## Status: STOPPED after the bug-fix iteration on user request (2026-10-24).

@@ -426,9 +426,10 @@ unsafe fn extend_end2end_max_avx2(
 /// Returns `Some((k, offset))` for the first diagonal that reaches a free end,
 /// `None` otherwise. When several diagonals terminate in the same step, which
 /// one is reported decides the alignment, so the order of the checks follows
-/// C's kernel for the target: with AVX2, `wavefront_extend_matches_packed_endsfree_avx2`
-/// (peeled diagonals first, then per 8-diagonal chunk the diagonals whose first
-/// 4 characters matched, then all diagonals); otherwise lo to hi.
+/// C's kernel for the target: `wavefront_extend_matches_packed_endsfree_avx512`
+/// (16 lanes) with AVX-512CD/VL, else the AVX2 one (8 lanes): peeled diagonals
+/// first, then per chunk the diagonals whose first 4 characters matched, then
+/// all diagonals; without AVX2, lo to hi.
 #[inline]
 pub fn extend_matches_packed_endsfree(
     sequences: &WavefrontSequences,
@@ -468,8 +469,12 @@ pub fn extend_matches_packed_endsfree(
             return None;
         }
 
+        // C's kernel is chosen at compile time: 16 lanes with AVX-512CD/VL,
+        // else 8 with AVX2. The lane count fixes which diagonals are peeled
+        // (checked first, in order), so follow the same rule.
+        const LANES: i32 = if cfg!(all(target_feature = "avx512cd", target_feature = "avx512vl")) { 16 } else { 8 };
         let num_diagonals = hi - lo + 1;
-        let peel = num_diagonals % 8;
+        let peel = num_diagonals % LANES;
         for k in lo..lo + peel {
             let offset = *centered.offset(k as isize);
             if offset < 0 {
@@ -481,7 +486,7 @@ pub fn extend_matches_packed_endsfree(
                 return Some((k, offset));
             }
         }
-        if num_diagonals < 8 {
+        if num_diagonals < LANES {
             return None;
         }
         // Lanes whose first 4 characters matched terminate right away (in
@@ -490,7 +495,7 @@ pub fn extend_matches_packed_endsfree(
         let mut pending: Option<(i32, WfOffset)> = None;
         let mut chunk = lo + peel;
         while chunk <= hi {
-            for k in chunk..chunk + 8 {
+            for k in chunk..chunk + LANES {
                 let offset = *centered.offset(k as isize);
                 if offset < 0 {
                     *centered.offset(k as isize) = OFFSET_NULL;
@@ -507,7 +512,7 @@ pub fn extend_matches_packed_endsfree(
                     }
                 }
             }
-            chunk += 8;
+            chunk += LANES;
         }
         pending
     }

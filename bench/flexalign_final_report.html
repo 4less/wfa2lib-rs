@@ -1,0 +1,320 @@
+<title>wfa2lib-rs Flexalign Loop</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column (bench-notebook), figures full column width, data in mono. */
+:root {
+  --bg: #f7f8f8;
+  --surface: #ffffff;
+  --fg: #141a1f;
+  --fg-2: #4b565f;
+  --muted: #7f8a93;
+  --grid: #e3e7ea;
+  --axis: #c2c9ce;
+  --border: rgba(20,26,31,0.10);
+  --accent: #2a78d6;       /* series 1 */
+  --accent-soft: #cde2fb;
+  --good: #0ca30c;
+  --critical: #d03b3b;
+  --differ: #9aa5ad;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111416; --surface: #1a1e21; --fg: #eef1f3; --fg-2: #c0c7cc; --muted: #8b949c;
+    --grid: #2a3034; --axis: #3a4247; --border: rgba(255,255,255,0.10);
+    --accent: #3987e5; --accent-soft: #1c3a5e; --good: #0ca30c; --critical: #d03b3b; --differ: #6b767e;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111416; --surface: #1a1e21; --fg: #eef1f3; --fg-2: #c0c7cc; --muted: #8b949c;
+  --grid: #2a3034; --axis: #3a4247; --border: rgba(255,255,255,0.10);
+  --accent: #3987e5; --accent-soft: #1c3a5e; --good: #0ca30c; --critical: #d03b3b; --differ: #6b767e;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--font-body); font-size: 15px; line-height: 1.55;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 64px;
+}
+main { max-width: 880px; margin: 0 auto; display: grid; gap: 40px; }
+h1, h2, h3 { text-wrap: balance; line-height: 1.2; margin: 0; }
+h1 { font-size: 1.9rem; font-weight: 600; letter-spacing: -0.01em; }
+h2 { font-size: 1.25rem; font-weight: 600; }
+h3 { font-size: 1rem; font-weight: 600; }
+p { margin: 0; max-width: 66ch; }
+section { display: grid; gap: 16px; }
+.eyebrow { font-family: var(--font-mono); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); }
+.lede { color: var(--fg-2); font-size: 1.05rem; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 14px 16px; display: grid; gap: 4px; min-width: 0; }
+.kpi .v { font-family: var(--font-mono); font-size: 1.6rem; font-weight: 500; line-height: 1.1; }
+.kpi .l { font-size: 0.82rem; color: var(--fg-2); }
+figure { margin: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 16px; display: grid; gap: 10px; min-width: 0; }
+figcaption { font-size: 0.85rem; color: var(--fg-2); max-width: none; }
+svg { width: 100%; height: auto; display: block; font-family: var(--font-body); }
+svg text { fill: var(--fg-2); font-size: 11px; }
+svg .tick { fill: var(--muted); font-family: var(--font-mono); font-size: 10.5px; }
+svg .grid { stroke: var(--grid); stroke-width: 1; }
+svg .axis { stroke: var(--axis); stroke-width: 1; }
+svg .ref { stroke: var(--muted); stroke-width: 1; stroke-dasharray: 3 3; }
+svg .line { fill: none; stroke: var(--accent); stroke-width: 2; stroke-linejoin: round; }
+svg .dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+svg .dropped { fill: var(--surface); stroke: var(--muted); stroke-width: 1.5; }
+svg .bar { fill: var(--accent); }
+svg .lbl { fill: var(--fg); font-family: var(--font-mono); font-size: 11px; }
+svg .name { fill: var(--fg); font-size: 11.5px; }
+svg .pass { fill: var(--good); } svg .differ { fill: var(--differ); } svg .crash { fill: var(--critical); }
+.legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.82rem; color: var(--fg-2); }
+.legend span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; background: var(--sw); }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 0.9rem; }
+th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--grid); vertical-align: top; }
+th { font-weight: 500; color: var(--fg-2); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.05em; }
+td.n, th.n { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.pos { color: var(--good); }
+ul, ol { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; max-width: 70ch; }
+li { padding-left: 2px; }
+code { font-family: var(--font-mono); font-size: 0.86em; background: var(--surface); border: 1px solid var(--border); border-radius: 3px; padding: 0 4px; }
+.split { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 24px; }
+.note { font-size: 0.85rem; color: var(--muted); }
+.pill { display: inline-block; font-family: var(--font-mono); font-size: 0.72rem; padding: 1px 7px; border-radius: 10px; border: 1px solid var(--border); color: var(--fg-2); margin-left: 6px; vertical-align: 1px; }
+</style>
+
+<main>
+<header style="display:grid;gap:12px">
+  <div class="eyebrow">wfa2lib-rs · flexalign branches · 2026-10-24</div>
+  <h1>Flexalign alignment loop: speed, memory and C-identity</h1>
+  <p class="lede">25 optimisation iterations followed by a validation and bug-fix round against the original WFA2-lib. All measurements are min-of-N on one pinned core (Zen 5), gap-affine penalties 0/10/12/3, CIGAR scope, WF-adaptive 10/50/1, 150 bp reads unless stated.</p>
+  <div class="kpis">
+    <div class="kpi"><div class="v">0.59×</div><div class="l">time per alignment vs v0 (weighted geo-mean, final build)</div></div>
+    <div class="kpi"><div class="v">1.71×</div><div class="l">throughput vs v0</div></div>
+    <div class="kpi"><div class="v">6–10×</div><div class="l">less peak heap per aligner</div></div>
+    <div class="kpi"><div class="v">1452 / 1678</div><div class="l">configs identical to C (v0: 1029)</div></div>
+  </div>
+</header>
+
+<section>
+  <div class="eyebrow">Figure 1</div>
+  <h2>Time per alignment relative to v0, by version</h2>
+  <figure>
+    <svg id="fig-speed" viewBox="0 0 860 330" role="img" aria-label="Line chart of time per alignment relative to v0 across versions v0 to v25"></svg>
+    <div class="legend"><span style="--sw:var(--accent)">taken version</span><span style="--sw:var(--surface);outline:1.5px solid var(--muted)">dropped or neutral candidate</span><span style="--sw:var(--muted)">dashed: 1.5× throughput (50% faster)</span></div>
+    <figcaption>Weighted geometric mean of ns per alignment over the six flexalign-shaped workloads (150 bp end-to-end 2%, 150 bp ANI drop, dovetail, extension, 1 kb 5%, 1 kb 0.5%), each version measured against the v0 baseline on the same harness. Versions v21 to v23 were taken for memory, not speed.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <div class="eyebrow">Figure 2</div>
+  <h2>Final build vs v0, per workload</h2>
+  <figure>
+    <svg id="fig-work" viewBox="0 0 860 250" role="img" aria-label="Bar chart of final time ratio per workload"></svg>
+    <figcaption>Ratio of ns per alignment, final build (v25) over v0. Lower is faster. Hover a bar for the absolute numbers.</figcaption>
+  </figure>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>workload</th><th class="n">v0 ns/pair</th><th class="n">final ns/pair</th><th class="n">ratio</th><th class="n">v0 peak heap</th><th class="n">final peak heap</th></tr></thead>
+    <tbody id="tbl-work"></tbody>
+  </table>
+  </div>
+  <p class="note">Peak heap is the growth beyond the aligner's base footprint during the workload. The base footprint itself went from about 0.30 MB (v0) to 0.09 MB. Peak RSS on the large C-reference inputs is at or below v0 everywhere measured (gap-affine 2-piece ends-free: 2.27 GB vs 2.45 GB; gap-affine: 279 MB vs 293 MB).</p>
+</section>
+
+<section>
+  <div class="eyebrow">Figure 3</div>
+  <h2>Behavioural identity with WFA2-lib (1710-config differential matrix)</h2>
+  <figure>
+    <svg id="fig-matrix" viewBox="0 0 860 230" role="img" aria-label="Stacked bars of matrix outcomes per stage"></svg>
+    <div class="legend"><span style="--sw:var(--good)">identical to C (score + CIGAR)</span><span style="--sw:var(--differ)">different output</span><span style="--sw:var(--critical)">Rust crash or hang</span></div>
+    <figcaption>5 datasets × 7 penalty sets × 3 modes × 4 ends-free spans × 6 heuristics, each pair compared on score and CIGAR against the C <code>align_benchmark</code>. 32 configs where C itself errors are excluded (1678 compared). No config that passed in v0 fails in any later stage.</figcaption>
+  </figure>
+</section>
+
+<section>
+  <h2>What changed</h2>
+  <div class="split">
+    <div>
+      <h3>Speed <span class="pill">v1–v18</span></h3>
+      <ul>
+        <li>WF-adaptive cutoff without a distance buffer, then a vectorised reduce scan and an AVX2 min-distance pass.</li>
+        <li>Wavefront pads nulled at allocation (AVX2 fill, pads only, one dispatch for the three outputs) instead of per-step init.</li>
+        <li>Gap-affine kernel: no scalar tail, inlined, AVX-512VL bounds check; compute step specialised on memory mode.</li>
+        <li>Ends-free: one-pass termination, begin-free init as fill plus identity ramp; 32-byte extend compares.</li>
+        <li>Trimming within the input hull; three-in-one output allocation.</li>
+      </ul>
+    </div>
+    <div>
+      <h3>Memory <span class="pill">v7, v21–v24</span></h3>
+      <ul>
+        <li>CIGAR-mode wavefronts sized by need, rounded to 16 elements; headroom only below 1024 elements.</li>
+        <li>Per-score component arrays capped at the step limit.</li>
+        <li>Arena starts at 64 KB and grows geometrically to 1 MB chunks; null and victim wavefronts start at ±256.</li>
+      </ul>
+      <h3 style="margin-top:16px">Correctness <span class="pill">v24–v25</span></h3>
+      <ul>
+        <li><b>Null-wavefront range (v24):</b> resizing a 1-wide range proposed a bound outside the null wavefront, so the kernel read freed memory. The same arithmetic is latent in C.</li>
+        <li><b>Null-step accounting and null-input substitution:</b> ported from C. Root cause of the banded and X-drop crashes and the end-only ends-free differences.</li>
+        <li><b>Match-reward ends-free</b> diagonals (C's <code>wavefront_compute_endsfree_*</code>) were missing.</li>
+        <li><b>Ends-free termination order</b> now follows the SIMD lane count the build targets, as the C kernel does.</li>
+        <li><b>Exact input-range union</b> with null inputs, and the BiWFA unreachable check on a null base.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Verification of the final build</h2>
+  <div class="tablewrap">
+  <table>
+    <thead><tr><th>check</th><th>result</th></tr></thead>
+    <tbody>
+      <tr><td>cargo tests (unit + reference)</td><td class="n pos">213 + 19 pass</td></tr>
+      <tr><td>C-reference suite (tests/wfa_utest.sh, full CIGAR identity)</td><td class="n pos">60 / 60</td></tr>
+      <tr><td>flexalign exact config vs C (96 pairs)</td><td class="n pos">96 / 96 identical</td></tr>
+      <tr><td>Differential matrix vs C, regressions against v0</td><td class="n pos">0</td></tr>
+      <tr><td>A/B v25 vs v24 (speed)</td><td class="n">0.98× (neutral)</td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="note">The v25 A/B record is flagged as a checksum change on the dovetail workload only. That is the intended effect of the ends-free termination-order fix: the alignment score is unchanged and the reported end point now matches C for the SIMD width of the build.</p>
+</section>
+
+<section>
+  <h2>Remaining differences vs C (226 configs)</h2>
+  <ul>
+    <li><b>Gap-affine with match reward (62 configs):</b> global, ends-free and extension outputs differ from C. The ends-free diagonal port fixed about 100 configs; the remaining ones need the same treatment in the main loop.</li>
+    <li><b>Gap-affine with penalties 0/3/1/4 (26):</b> ends-free, global and extension ties; includes the two X-drop pairs on short_e05 (one tie-break, one where C stops at −22 vs our −19).</li>
+    <li><b>Banded, band-adaptive and Z-drop on edit, indel, linear and gap-affine penalties (about 100):</b> a different pruning path, no crashes.</li>
+    <li><b>End-only ends-free ties (about 30):</b> one or two pairs per 2000 where C picks another optimal end point; exact DP shows C suboptimal in several.</li>
+    <li><b>Still crashing (4):</b> gap-affine 2-piece with a static or adaptive band in CIGAR mode on short_e20 and utest (segfault). BiWFA with heuristics (12) no longer crashes but differs.</li>
+  </ul>
+  <p class="note">Full per-config list and the loop log: <code>bench/flexalign_history.jsonl</code>, <code>bench/flexalign_report.html</code>, <code>.claude/flexalign_loop.md</code>. Matrix driver: <code>tests/diff_vs_c.sh</code>.</p>
+</section>
+</main>
+
+<script>
+(function () {
+  // ---- data ----
+  var v0 = {"e2e_150_2pct":2604.7,"e2e_150_drop":25712.5,"dovetail_150":8389.4,"extend_150":8552.4,"e2e_1k_5pct":128456.6,"e2e_1k_05pct":6294.0};
+  var v0heap = {"e2e_150_2pct":1627861,"e2e_150_drop":1629084,"dovetail_150":1382566,"extend_150":1593275,"e2e_1k_5pct":11178106,"e2e_1k_05pct":2587611};
+  var fin = {"e2e_150_2pct":1603.4,"e2e_150_drop":13607.6,"dovetail_150":5108.4,"extend_150":4767.9,"e2e_1k_5pct":72638.7,"e2e_1k_05pct":4254.3};
+  var finheap = {"e2e_150_2pct":152827,"e2e_150_drop":218371,"dovetail_150":349639,"extend_150":349171,"e2e_1k_5pct":2513618,"e2e_1k_05pct":251203};
+  var names = {"e2e_150_2pct":"150 bp end-to-end, 2% div.","e2e_150_drop":"150 bp ANI drop (max score)","dovetail_150":"150 bp dovetail (ends-free)","extend_150":"150 bp extension (ends-free)","e2e_1k_5pct":"1 kb end-to-end, 5% div.","e2e_1k_05pct":"1 kb end-to-end, 0.5% div."};
+  var order = ["e2e_150_2pct","e2e_150_drop","dovetail_150","extend_150","e2e_1k_5pct","e2e_1k_05pct"];
+  // version, geo-mean vs v0, taken?
+  var versions = [
+    ["v0",1.000,1],["v1",0.896,1],["v2",0.860,1],["v3",0.813,1],["v4",0.754,1],["v5",0.728,1],["v6",0.718,1],
+    ["v7",0.708,1],["v8",0.696,1],["v9",0.692,1],["v10",0.681,1],["v11",0.673,1],["v12",null,0],["v13",null,0],["v14",null,0],
+    ["v15",0.628,1],["v16",null,0],["v17",0.622,1],["v18",0.593,1],["v19",0.593,0],["v20",0.592,0],["v21",0.593,1],
+    ["v22",0.592,1],["v23",0.591,1],["v24",0.596,1],["v25",0.585,1]
+  ];
+  var stages = [
+    ["v0 (start)",1029,413,236],
+    ["v24 null-range fix",1029,413,236],
+    ["null steps + null inputs",1253,378,47],
+    ["ends-free reward + lane order",1397,277,4],
+    ["final (v25)",1452,222,4]
+  ];
+
+  var NS = "http://www.w3.org/2000/svg";
+  function el(tag, attrs, parent, text) {
+    var e = document.createElementNS(NS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  }
+  function fmt(n) { return n.toLocaleString("en-US", {maximumFractionDigits: 0}); }
+  function mb(b) { return (b / 1048576).toFixed(2) + " MB"; }
+
+  // ---- Figure 1: line ----
+  (function () {
+    var svg = document.getElementById("fig-speed");
+    var L = 52, R = 20, T = 18, B = 40, W = 860, H = 330;
+    var pw = W - L - R, ph = H - T - B;
+    var ymin = 0.5, ymax = 1.05;
+    var x = function (i) { return L + i * pw / (versions.length - 1); };
+    var y = function (v) { return T + (ymax - v) / (ymax - ymin) * ph; };
+    [0.5, 0.6, 0.7, 0.8, 0.9, 1.0].forEach(function (t) {
+      el("line", {x1: L, x2: W - R, y1: y(t), y2: y(t), "class": "grid"}, svg);
+      el("text", {x: L - 8, y: y(t) + 3.5, "text-anchor": "end", "class": "tick"}, svg, t.toFixed(2) + "×");
+    });
+    el("line", {x1: L, x2: W - R, y1: y(ymin), y2: y(ymin), "class": "axis"}, svg);
+    el("line", {x1: L, x2: W - R, y1: y(2/3), y2: y(2/3), "class": "ref"}, svg);
+    el("text", {x: W - R - 4, y: y(2/3) - 5, "text-anchor": "end", "class": "tick"}, svg, "0.667× = 1.5× throughput");
+    var pts = [];
+    versions.forEach(function (v, i) {
+      el("text", {x: x(i), y: H - B + 16, "text-anchor": "middle", "class": "tick"}, svg, v[0]);
+      if (v[1] != null && v[2]) pts.push([x(i), y(v[1])]);
+    });
+    el("path", {d: pts.map(function (p, i) { return (i ? "L" : "M") + p[0].toFixed(1) + " " + p[1].toFixed(1); }).join(" "), "class": "line"}, svg);
+    versions.forEach(function (v, i) {
+      if (v[1] == null) return;
+      var c = el("circle", {cx: x(i), cy: y(v[1]), r: v[2] ? 4.5 : 4, "class": v[2] ? "dot" : "dropped"}, svg);
+      el("title", {}, c, v[0] + ": " + v[1].toFixed(3) + "× time vs v0" + (v[2] ? "" : " (not taken)"));
+      if (v[0] === "v0" || v[0] === "v11" || v[0] === "v18" || v[0] === "v25") {
+        el("text", {x: x(i) + (v[0] === "v25" ? -8 : 8), y: y(v[1]) - 10, "text-anchor": v[0] === "v25" ? "end" : "start", "class": "lbl"}, svg, v[1].toFixed(2) + "×");
+      }
+    });
+    el("text", {x: L, y: 10, "class": "tick"}, svg, "time per alignment, v0 = 1.00×");
+  })();
+
+  // ---- Figure 2: ratio bars ----
+  (function () {
+    var svg = document.getElementById("fig-work");
+    var L = 230, R = 70, T = 14, B = 30, W = 860, H = 250;
+    var pw = W - L - R, rowh = (H - T - B) / order.length;
+    var xmax = 1.0;
+    var x = function (v) { return L + v / xmax * pw; };
+    [0, 0.25, 0.5, 0.75, 1.0].forEach(function (t) {
+      el("line", {x1: x(t), x2: x(t), y1: T, y2: H - B, "class": t === 0 ? "axis" : "grid"}, svg);
+      el("text", {x: x(t), y: H - B + 16, "text-anchor": "middle", "class": "tick"}, svg, t.toFixed(2) + "×");
+    });
+    order.forEach(function (w, i) {
+      var r = fin[w] / v0[w];
+      var yy = T + i * rowh + rowh * 0.2, h = rowh * 0.6;
+      el("text", {x: L - 10, y: yy + h / 2 + 4, "text-anchor": "end", "class": "name"}, svg, names[w]);
+      var g = el("g", {}, svg);
+      var bar = el("rect", {x: x(0), y: yy, width: x(r) - x(0), height: h, rx: 3, "class": "bar"}, g);
+      el("title", {}, g, names[w] + ": " + fmt(v0[w]) + " ns -> " + fmt(fin[w]) + " ns per pair (" + r.toFixed(3) + "×)");
+      el("text", {x: x(r) + 6, y: yy + h / 2 + 4, "class": "lbl"}, svg, r.toFixed(2) + "×");
+    });
+    var tb = document.getElementById("tbl-work");
+    order.forEach(function (w) {
+      var tr = document.createElement("tr");
+      tr.innerHTML = "<td>" + names[w] + "</td><td class=n>" + fmt(v0[w]) + "</td><td class=n>" + fmt(fin[w]) + "</td><td class=n>" + (fin[w] / v0[w]).toFixed(2) + "×</td><td class=n>" + mb(v0heap[w]) + "</td><td class=n>" + mb(finheap[w]) + "</td>";
+      tb.appendChild(tr);
+    });
+  })();
+
+  // ---- Figure 3: stacked bars ----
+  (function () {
+    var svg = document.getElementById("fig-matrix");
+    var L = 230, R = 20, T = 14, B = 30, W = 860, H = 230;
+    var pw = W - L - R, rowh = (H - T - B) / stages.length;
+    var total = 1678;
+    var x = function (v) { return L + v / total * pw; };
+    [0, 400, 800, 1200, 1678].forEach(function (t) {
+      el("line", {x1: x(t), x2: x(t), y1: T, y2: H - B, "class": t === 0 ? "axis" : "grid"}, svg);
+      el("text", {x: x(t), y: H - B + 16, "text-anchor": "middle", "class": "tick"}, svg, String(t));
+    });
+    stages.forEach(function (s, i) {
+      var yy = T + i * rowh + rowh * 0.2, h = rowh * 0.6;
+      el("text", {x: L - 10, y: yy + h / 2 + 4, "text-anchor": "end", "class": "name"}, svg, s[0]);
+      var segs = [[s[1], "pass", "identical"], [s[2], "differ", "different"], [s[3], "crash", "crash/hang"]];
+      var acc = 0;
+      segs.forEach(function (sg) {
+        if (!sg[0]) return;
+        var g = el("g", {}, svg);
+        el("rect", {x: x(acc) + (acc ? 1 : 0), y: yy, width: Math.max(0, x(acc + sg[0]) - x(acc) - (acc ? 1 : 0)), height: h, rx: 2, "class": sg[1]}, g);
+        el("title", {}, g, s[0] + ": " + sg[0] + " " + sg[2]);
+        acc += sg[0];
+      });
+      el("text", {x: x(0) + 6, y: yy + h / 2 + 4, "class": "lbl", fill: "#ffffff", style: "fill:#fff"}, svg, String(s[1]));
+    });
+  })();
+})();
+</script>

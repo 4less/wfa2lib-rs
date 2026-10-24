@@ -22,8 +22,8 @@ use crate::wavefront::Wavefront;
 pub const WF_PTR_NONE: *mut Wavefront = std::ptr::null_mut();
 
 /// Initial size for null/victim wavefronts.
-const WF_NULL_INIT_LO: i32 = -1024;
-const WF_NULL_INIT_HI: i32 = 1024;
+const WF_NULL_INIT_LO: i32 = -256;
+const WF_NULL_INIT_HI: i32 = 256;
 
 /// Component index constants.
 pub const COMP_M: usize = 0;
@@ -529,7 +529,7 @@ mod tests {
     fn test_resize_null_victim() {
         let penalties = WavefrontPenalties::new_edit();
         let mut comp = WavefrontComponents::<1>::new(100, 100, &penalties, false, false);
-        // Initially covers [-1024, 1024]
+        // Initially covers [-256, 256]
         // Request something within bounds — no resize
         comp.resize_null_victim(-100, 100);
 

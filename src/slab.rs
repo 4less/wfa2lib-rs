@@ -73,8 +73,10 @@ impl WavefrontSlab {
         // Per-wavefront arena bytes: offsets (+ bt_pcigar + bt_prev).
         let arrays_per_wf = if allocate_backtrace { 3 } else { 1 };
         let bytes_per_wf = (init_wf_length as usize) * 4 * arrays_per_wf;
-        // Initial chunk sized for ~64 wavefronts; the arena adds chunks as needed.
-        let arena_capacity = (bytes_per_wf * 64).max(65536);
+        // Initial chunk: 64 KB (a 150 bp CIGAR alignment uses ~20 KB of
+        // wavefront arrays); the arena adds chunks of this size as needed,
+        // or a larger one for a single oversized wavefront.
+        let arena_capacity = (bytes_per_wf * 4).clamp(65536, 65536);
         Self {
             allocate_backtrace,
             slab_mode,

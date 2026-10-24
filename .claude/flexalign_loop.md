@@ -73,6 +73,9 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 - it21 (v21, taken for memory, speed 0.999x): per-score component arrays capped at max_alignment_steps+1 (CIGAR mode). Peak heap 150bp 93 KB -> 22 KB; 1k 0.5% 0.50 MB -> 55 KB; 1k 5% 2.2 -> 1.8 MB.
   Note: outputs of a step are already adjacent in the bump arena; "contiguous triple" idea has no slack.
 
+- it22 (v22, taken for memory, speed 0.998x): arena first chunk 64 KB, null/victim +-256: base footprint 293 -> 90 KB. Harness now reports aligner_heap (base) next to growth.
+  Memory insight: CIGAR mode keeps all wavefronts: drop case ~230 KB = 151 steps x 3 x 128 slots x 4 B (1.5x headroom + round-to-32). Exact sizing would halve it but hurts recycling.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

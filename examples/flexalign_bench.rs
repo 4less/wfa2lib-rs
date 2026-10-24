@@ -264,7 +264,10 @@ fn run_cases(aligner: &mut AffineAligner, cases: &[Case]) -> u64 {
 }
 
 fn bench(name: &str, cases: &[Case], reps: usize) {
+    let before = LIVE.load(Ordering::Relaxed);
     let mut aligner = new_aligner();
+    // The aligner's own footprint before any alignment (arena chunks, null/victim wavefronts, ...).
+    let aligner_heap = LIVE.load(Ordering::Relaxed) - before;
     // Warm-up (also sizes internal buffers like a long-lived flexalign worker).
     let live0 = reset_peak();
     let checksum = run_cases(&mut aligner, cases);
@@ -278,7 +281,7 @@ fn bench(name: &str, cases: &[Case], reps: usize) {
     }
     let peak = PEAK.load(Ordering::Relaxed) - live0;
     println!(
-        "{{\"workload\":\"{name}\",\"pairs\":{},\"ns_per_pair\":{:.1},\"peak_heap\":{peak},\"checksum\":\"{checksum:016x}\"}}",
+        "{{\"workload\":\"{name}\",\"pairs\":{},\"ns_per_pair\":{:.1},\"peak_heap\":{peak},\"aligner_heap\":{aligner_heap},\"checksum\":\"{checksum:016x}\"}}",
         cases.len(),
         best * 1e9 / cases.len() as f64
     );

@@ -59,6 +59,8 @@ def merge_min(acc, rows):
         else:
             acc[k]["ns_per_pair"] = min(acc[k]["ns_per_pair"], r["ns_per_pair"])
             acc[k]["peak_heap"] = max(acc[k]["peak_heap"], r["peak_heap"])
+            if "aligner_heap" in r:
+                acc[k]["aligner_heap"] = max(acc[k].get("aligner_heap", 0), r["aligner_heap"])
             if acc[k]["checksum"] != r["checksum"]:
                 acc[k]["checksum"] = "MISMATCH"
     return acc
@@ -131,9 +133,13 @@ def write_report(history):
             if v0 and w in v0["candidate"]:
                 vs0 = f"<span class=vs0>{c['ns_per_pair'] / v0['candidate'][w]['ns_per_pair']:.3f}× v0</span>"
             chk = "" if c.get("checksum") != "MISMATCH" else " <b class=bad>checksum!</b>"
+            mem = fmt_mb(c['peak_heap'])
+            if c.get("aligner_heap") is not None:
+                # growth during alignment + the aligner's base footprint
+                mem = f"{fmt_mb(c['peak_heap'])} + {fmt_mb(c['aligner_heap'])} base"
             cells.append(
                 f"<td><b>{fmt_ns(c['ns_per_pair'])}</b><br><small>{ratio} {vs0}</small>"
-                f"<br><small class=mem>{fmt_mb(c['peak_heap'])}</small>{chk}</td>"
+                f"<br><small class=mem>{mem}</small>{chk}</td>"
             )
         gr = h.get("geo_ratio")
         vs0_geo = ""
@@ -172,7 +178,8 @@ svg {{ max-width:100%; height:auto; background:var(--bg); }}
 <h1>wfa2lib-rs · flexalign-shaped benchmark history</h1>
 <p>Gap-affine (0,10,12,3), CIGAR scope, WF-adaptive (10,50,1), ANI max-score abort, ends-free spans.
 Each cell: min ns/pair over alternating A/B rounds pinned to core {CORE}; ratio vs. the baseline it was
-measured against, and vs. v0. Memory = peak live heap of the workload (counting allocator).
+measured against, and vs. v0. Memory = peak live heap growth during the workload (counting allocator); from v22 on
+also the aligner's base footprint before any alignment ("+ … base"); the total is their sum.
 Rows: <span style="background:var(--ok)">taken</span> ·
 <span style="background:var(--warn)">dropped (slower)</span> ·
 <span style="background:var(--bad)">failed (tests / build / checksum)</span>.</p>
@@ -291,6 +298,7 @@ def main():
                 f"  {w:14s} {c['ns_per_pair']:10.1f} ns"
                 + (f"  vs {b['ns_per_pair']:10.1f}  ({c['ns_per_pair'] / b['ns_per_pair']:.3f}x)" if b else "")
                 + f"  heap {c['peak_heap'] / 1e6:.2f} MB"
+                + (f" + {c['aligner_heap'] / 1e6:.2f} MB base" if c.get("aligner_heap") is not None else "")
             )
 
 

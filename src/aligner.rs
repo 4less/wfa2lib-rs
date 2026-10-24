@@ -1756,9 +1756,8 @@ impl<const N: usize> WavefrontAligner<N> {
 
     /// Output wavefront allocated over [eff_lo, eff_hi]. In modular mode `old` is
     /// the out-of-scope wavefront in the output slot: reuse it if large enough.
-    #[inline(always)]
-    /// Output wavefront for `[eff_lo, eff_hi]` with limits `[lo, hi]`, which
-    /// the kernel writes in full (only the pads are nulled).
+    /// The limits `[lo, hi]` are set and the kernel writes that range in full
+    /// (only the pads are nulled).
     #[inline(always)]
     fn alloc_output(&mut self, old: *mut Wavefront, eff_lo: i32, eff_hi: i32, lo: i32, hi: i32) -> *mut Wavefront {
         if !old.is_null() {

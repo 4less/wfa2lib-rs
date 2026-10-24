@@ -46,6 +46,8 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 
 - it11 (v11, taken, 0.985x vs v10, 0.638x vs v0): WF-adaptive reduce vectorised (scalar-first on the end diagonal, then 8-lane blocks). Ends-free 0.96-0.98x, 1k 0.98x, short e2e neutral.
 
+- it12 (v12, DROPPED): M hull from kernel oob masks instead of trimming M: +4-6% slower on wide wavefronts (both branchy and cmov variants). Lesson: never add per-block work to the kernel; trims are cheap after v8.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

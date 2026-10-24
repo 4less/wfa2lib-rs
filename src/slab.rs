@@ -338,12 +338,12 @@ impl WavefrontSlab {
 
     /// Tight mode allocation size for a request of `wf_length` elements:
     /// 50% headroom (so the next alignment's slightly wider wavefront can
-    /// recycle it), rounded up to 32 elements. Sizing by need instead of a
+    /// recycle it), rounded up to 16 elements. Sizing by need instead of a
     /// fixed 1000 elements keeps memory proportional to the wavefronts and
     /// avoids placing every array at the same 4 KB page offset.
     #[inline(always)]
     fn tight_alloc_length(wf_length: i32) -> i32 {
-        ((wf_length + wf_length / 2 + 31) & !31).max(64)
+        ((wf_length + wf_length / 2 + 15) & !15).max(48)
     }
 
     #[inline(always)]

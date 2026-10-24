@@ -76,6 +76,8 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 - it22 (v22, taken for memory, speed 0.998x): arena first chunk 64 KB, null/victim +-256: base footprint 293 -> 90 KB. Harness now reports aligner_heap (base) next to growth.
   Memory insight: CIGAR mode keeps all wavefronts: drop case ~230 KB = 151 steps x 3 x 128 slots x 4 B (1.5x headroom + round-to-32). Exact sizing would halve it but hurts recycling.
 
+- it23 (v23, taken for memory, speed 0.996x): Tight sizing rounded to 16 (min 48). 1.25x headroom variant: -30% heap on short reads but +20% on 1k 5% (recycle misses); not taken.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

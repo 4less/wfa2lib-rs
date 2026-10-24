@@ -62,6 +62,9 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 - it17 (v17, taken, 0.992x vs v15, 0.626x vs v0): pads of the 3 outputs nulled with one length dispatch per side (fill_null_n). Instr/step on the drop case now ~1650 (was ~2120 at v3).
   Per-alignment work (init_alignment, backtrace) measured negligible on short reads; the component-array clear is ~0.2%.
 
+- it18 (v18, taken, 0.953x vs v17, 0.597x vs v0): compute_affine_step specialised on MODULAR (const generic). Bigger than expected (150bp 0.92x): the flag loads/branches and slot() calls were in the way of scheduling.
+  Idea: the same specialisation for extend_end2end/extend_endsfree + apply_heuristic_cutoff (Lambda vs packed, heuristic kind) might give a bit more.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

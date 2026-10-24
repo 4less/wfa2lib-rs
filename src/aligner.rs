@@ -794,7 +794,20 @@ impl<const N: usize> WavefrontAligner<N> {
     }
 
     /// Compute the next wavefront for gap-affine distance.
+    #[inline(always)]
     fn compute_affine_step(&mut self, score: i32) {
+        if self.wf_components.memory_modular {
+            self.compute_affine_step_impl::<true>(score)
+        } else {
+            self.compute_affine_step_impl::<false>(score)
+        }
+    }
+
+    /// `compute_affine_step` specialised on the memory mode: in CIGAR mode
+    /// (`MODULAR == false`) slots are the scores themselves and nothing is
+    /// freed, so those branches vanish.
+    #[inline(always)]
+    fn compute_affine_step_impl<const MODULAR: bool>(&mut self, score: i32) {
         let score_curr = score as usize;
         let plen = self.sequences.pattern_length;
         let tlen = self.sequences.text_length;
@@ -804,14 +817,14 @@ impl<const N: usize> WavefrontAligner<N> {
         let e = self.penalties.gap_extension1;
 
         // Pre-compute output slot once (avoids redundant modular divisions).
-        let out_slot = self.wf_components.slot_of(score_curr);
+        let out_slot = if MODULAR { self.wf_components.slot_of(score_curr) } else { score_curr };
 
         // Fetch input wavefront pointers directly from flat array.
         // Compute input slots once per distinct score to avoid redundant divs.
-        let ptr_m_misms = if score - x >= 0 { self.wf_components.get_m_ptr((score - x) as usize) } else { WF_PTR_NONE };
-        let ptr_m_open  = if score - o_plus_e >= 0 { self.wf_components.get_m_ptr((score - o_plus_e) as usize) } else { WF_PTR_NONE };
+        let ptr_m_misms = if score - x >= 0 { (if MODULAR { self.wf_components.get_m_ptr((score - x) as usize) } else { self.wf_components.get_m_ptr_slot((score - x) as usize) }) } else { WF_PTR_NONE };
+        let ptr_m_open  = if score - o_plus_e >= 0 { (if MODULAR { self.wf_components.get_m_ptr((score - o_plus_e) as usize) } else { self.wf_components.get_m_ptr_slot((score - o_plus_e) as usize) }) } else { WF_PTR_NONE };
         let (ptr_i1_ext, ptr_d1_ext) = if score - e >= 0 {
-            let s = self.wf_components.slot_of((score - e) as usize);
+            let s = if MODULAR { self.wf_components.slot_of((score - e) as usize) } else { (score - e) as usize };
             (self.wf_components.get_i1_ptr_slot(s), self.wf_components.get_d1_ptr_slot(s))
         } else {
             (WF_PTR_NONE, WF_PTR_NONE)
@@ -828,7 +841,7 @@ impl<const N: usize> WavefrontAligner<N> {
         }
 
         if lo > hi {
-            if self.wf_components.memory_modular {
+            if MODULAR {
                 self.free_output_wavefronts_affine(out_slot);
             }
             return;
@@ -838,7 +851,7 @@ impl<const N: usize> WavefrontAligner<N> {
         (lo, hi) = self.clamp_limits_heuristic(lo, hi);
 
         if lo > hi {
-            if self.wf_components.memory_modular {
+            if MODULAR {
                 self.free_output_wavefronts_affine(out_slot);
             }
             return;
@@ -852,7 +865,7 @@ impl<const N: usize> WavefrontAligner<N> {
 
         // Allocate or reuse 3 output wavefronts using pre-computed slot.
         let (eff_lo, eff_hi) = self.wf_components.compute_limits_output(lo, hi);
-        let modular = self.wf_components.memory_modular;
+        let modular = MODULAR;
         let (m_curr_ptr, i1_curr_ptr, d1_curr_ptr) = if modular {
             macro_rules! out_slot_wf {
                 ($comp:ident) => {{

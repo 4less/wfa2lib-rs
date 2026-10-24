@@ -48,6 +48,10 @@ Stop after 25 iterations. Loop job: cron 58f5e5de every 10 min (session-only).
 
 - it12 (v12, DROPPED): M hull from kernel oob masks instead of trimming M: +4-6% slower on wide wavefronts (both branchy and cmov variants). Lesson: never add per-block work to the kernel; trims are cheap after v8.
 
+- it13 (v13, FAILED): I1/D1 pads of 8 slots → non-deterministic output. Invariant: outputs must be null over their whole allocation outside [lo,hi]
+  (allocation = min(lo-pad, historic_min_lo)..), because inputs are read over the *output's* range, which follows the widest (older, unpruned) input.
+  Harness: checksum folds 8 bytes at a time now (bench-only; was 7% of 150bp time). Baseline binary rebuilt from unchanged code.
+
 ## Backlog (ideas, highest expected value first)
 - Per-step fixed overhead is THE lever for 150bp: 3 slab allocs (one recycle scan each) → allocate M/I1/D1 as one triple; trim_ends scalar scans → AVX2 + analytic null prefix for I1/D1; skip I1/D1 when both their inputs are null (needs kernel variants; backtrace already guards by init range).
 - Phase-timing (rdtsc) is misleading at this granularity (~40 cycles per probe); use perf with CARGO_PROFILE_RELEASE_DEBUG=1 and --sort srcline.

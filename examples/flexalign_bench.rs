@@ -246,9 +246,18 @@ fn run_cases(aligner: &mut AffineAligner, cases: &[Case]) -> u64 {
         h = fold(h, score as u64);
         h = fold(h, aligner.status() as u64);
         if aligner.status() != AlignStatus::MaxStepsReached {
-            for &op in aligner.cigar().operations_slice() {
-                h = fold(h, op as u64);
+            // Fold the CIGAR 8 bytes at a time (a byte-wise fold was ~7% of
+            // the measured time on short reads).
+            let ops = aligner.cigar().operations_slice();
+            let mut chunks = ops.chunks_exact(8);
+            for c in &mut chunks {
+                h = fold(h, u64::from_le_bytes(c.try_into().unwrap()));
             }
+            let mut tail = 0u64;
+            for &op in chunks.remainder() {
+                tail = (tail << 8) | op as u64;
+            }
+            h = fold(h, tail ^ (ops.len() as u64) << 56);
         }
     }
     h

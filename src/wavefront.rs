@@ -143,6 +143,44 @@ unsafe fn fill_null(ptr: *mut WfOffset, n: usize) {
     unsafe { std::slice::from_raw_parts_mut(ptr, n).fill(OFFSET_NULL) };
 }
 
+/// `fill_null` of `n` offsets at each of `ptrs`: the length dispatch is
+/// done once for all arrays (the pads of a step's outputs have equal size).
+///
+/// # Safety
+/// Every pointer must be valid for writing `n` elements.
+#[inline(always)]
+pub(crate) unsafe fn fill_null_n<const N: usize>(ptrs: [*mut WfOffset; N], n: usize) {
+    #[cfg(all(target_arch = "x86_64", target_feature = "avx2"))]
+    unsafe {
+        use std::arch::x86_64::*;
+        if n >= 8 {
+            let v = _mm256_set1_epi32(OFFSET_NULL);
+            for &p in &ptrs {
+                _mm256_storeu_si256(p as *mut __m256i, v);
+                _mm256_storeu_si256(p.add(n - 8) as *mut __m256i, v);
+            }
+            if n > 16 {
+                for &p in &ptrs {
+                    _mm256_storeu_si256(p.add(8) as *mut __m256i, v);
+                }
+                if n > 24 {
+                    let mut i = 16;
+                    while i + 8 < n {
+                        for &p in &ptrs {
+                            _mm256_storeu_si256(p.add(i) as *mut __m256i, v);
+                        }
+                        i += 8;
+                    }
+                }
+            }
+            return;
+        }
+    }
+    for &p in &ptrs {
+        unsafe { std::slice::from_raw_parts_mut(p, n).fill(OFFSET_NULL) };
+    }
+}
+
 impl Wavefront {
     /// Allocate a new wavefront with the given number of elements.
     ///
@@ -345,6 +383,18 @@ impl Wavefront {
     /// are set as by `set_limits`.
     #[inline(always)]
     pub fn init_output(&mut self, min_lo: i32, max_hi: i32, lo: i32, hi: i32) {
+        self.init_output_fields(min_lo, max_hi, lo, hi);
+        // SAFETY: both pads lie within the allocated buffer (asserted above).
+        unsafe {
+            fill_null(self.offsets_ptr, (lo - min_lo) as usize);
+            fill_null(self.centered_offsets.offset(hi as isize + 1), (max_hi - hi) as usize);
+        }
+    }
+
+    /// Set the fields of `init_output` without nulling the pads; the caller
+    /// nulls `[min_lo, lo)` and `(hi, max_hi]` itself (see `fill_null_n`).
+    #[inline(always)]
+    pub fn init_output_fields(&mut self, min_lo: i32, max_hi: i32, lo: i32, hi: i32) {
         debug_assert!(min_lo <= lo && hi <= max_hi && lo <= hi);
         debug_assert!(max_hi < min_lo + self.wf_elements_allocated);
         self.null = false;
@@ -357,11 +407,12 @@ impl Wavefront {
         }
         self.wf_elements_init_min = lo;
         self.wf_elements_init_max = hi;
-        // SAFETY: both pads lie within the allocated buffer (asserted above).
-        unsafe {
-            fill_null(self.offsets_ptr, (lo - min_lo) as usize);
-            fill_null(self.centered_offsets.offset(hi as isize + 1), (max_hi - hi) as usize);
-        }
+    }
+
+    /// Raw pointer to the slot of diagonal `k` (no bounds check).
+    #[inline(always)]
+    pub(crate) fn slot_ptr(&self, k: i32) -> *mut WfOffset {
+        self.centered_offsets.wrapping_offset(k as isize)
     }
 
     /// Initialize as a null wavefront (all offsets set to OFFSET_NULL).

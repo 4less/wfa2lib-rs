@@ -153,16 +153,28 @@ impl WavefrontSlab {
                 self.recycle_next += N;
                 self.num_handed_out += N;
                 for &wf in &out {
-                    unsafe {
-                        (*wf).status = WavefrontStatus::Busy;
-                        (*wf).init_output(min_lo, max_hi, lo, hi);
-                    }
+                    unsafe { (*wf).status = WavefrontStatus::Busy };
                 }
-                return out;
+            } else {
+                for slot in out.iter_mut() {
+                    *slot = self.allocate_raw(wf_length);
+                }
+            }
+        } else {
+            for slot in out.iter_mut() {
+                *slot = self.allocate_raw(wf_length);
             }
         }
-        for slot in out.iter_mut() {
-            *slot = self.allocate_output_ptr(min_lo, max_hi, lo, hi);
+        // Same range for all outputs: set the fields, then null the pads of
+        // all N arrays with one length dispatch per side.
+        unsafe {
+            for &wf in &out {
+                (*wf).init_output_fields(min_lo, max_hi, lo, hi);
+            }
+            let lo_ptrs = out.map(|wf| (*wf).slot_ptr(min_lo));
+            crate::wavefront::fill_null_n(lo_ptrs, (lo - min_lo) as usize);
+            let hi_ptrs = out.map(|wf| (*wf).slot_ptr(hi + 1));
+            crate::wavefront::fill_null_n(hi_ptrs, (max_hi - hi) as usize);
         }
         out
     }

@@ -1,0 +1,174 @@
+<title>flexalign vs protal</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Sans+Condensed:wght@600&display=swap">
+<style>
+/* Layout: one reading column; headline tiles, grouped bars for cost, an accuracy table, precision-recall curves, then the setup */
+:root {
+  --bg: #f6f7f5; --card: #ffffff; --fg: #18201d; --mute: #5b6661; --line: #d8ddd9;
+  --flex: #0f7a6c; --flexold: #7fb5ad; --protal: #b05a2a; --mbw: #5a4fa8; --grid: #e4e8e5;
+  --sans: "IBM Plex Sans", system-ui, sans-serif; --mono: "IBM Plex Mono", ui-monospace, monospace;
+  --display: "IBM Plex Sans Condensed", "IBM Plex Sans", sans-serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #121715; --card: #1a201e; --fg: #e3e9e6; --mute: #9aa6a0; --line: #2d3632;
+  --flex: #3cc2ad; --flexold: #2f6f66; --protal: #e48d5a; --mbw: #a399e6; --grid: #26302c; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #121715; --card: #1a201e; --fg: #e3e9e6; --mute: #9aa6a0; --line: #2d3632;
+  --flex: #3cc2ad; --flexold: #2f6f66; --protal: #e48d5a; --mbw: #a399e6; --grid: #26302c; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.55 var(--sans); }
+main { max-width: 900px; margin: 0 auto; padding-block: 32px 56px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 34px; }
+h1 { font: 600 1.9rem/1.15 var(--display); margin: 0; text-wrap: balance; }
+h2 { font: 600 1.2rem/1.25 var(--display); margin: 0; text-wrap: balance; }
+h3 { font: 600 1rem/1.25 var(--display); margin: 6px 0 0; }
+p { margin: 0; max-width: 72ch; }
+.mute { color: var(--mute); }
+.note { color: var(--mute); font-size: .86rem; }
+code { font-family: var(--mono); font-size: .86em; }
+header, section { display: grid; gap: 12px; min-width: 0; }
+.legend { display: flex; gap: 8px 18px; flex-wrap: wrap; font-size: .86rem; color: var(--mute); }
+.sw { display: inline-block; width: 12px; height: 12px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; }
+.tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+.tile { background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 14px 16px; display: grid; gap: 2px; }
+.tile .k { font-size: .74rem; letter-spacing: .06em; text-transform: uppercase; color: var(--mute); }
+.tile .v { font: 600 1.5rem var(--display); font-variant-numeric: tabular-nums; }
+.tile .s { font-size: .82rem; color: var(--mute); }
+.bars { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 18px 28px; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 18px; }
+.metric { display: grid; gap: 5px; min-width: 0; }
+.metric h4 { font-size: .88rem; margin: 0 0 2px; }
+.b { display: grid; grid-template-columns: 4.6rem minmax(0, 1fr) 4.8rem; gap: 8px; align-items: center; font-size: .82rem; }
+.b .bar { height: 12px; border-radius: 2px; }
+.b .v { font: .8rem var(--mono); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .9rem; }
+th, td { padding: 7px 10px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+th { font: 600 .72rem var(--mono); letter-spacing: .05em; text-transform: uppercase; color: var(--mute); }
+td.r, th.r { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+td.win { font-weight: 600; }
+figure { margin: 0; background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 14px 12px 8px; }
+svg text { fill: var(--mute); font: 12px var(--mono); }
+svg .lab { font: 600 12px var(--sans); }
+ul { margin: 0; padding-left: 1.2em; display: grid; gap: 6px; max-width: 74ch; }
+</style>
+
+<main>
+<header>
+  <h1>flexalign vs protal and minibwa on protal-mini</h1>
+  <p class="mute">flexalign <code>main@204aac9</code> against protal v0.6.0 and minibwa 0.7-r421. All three indexes were built from the same protal-mini marker reference (372,999 marker genes of 3,600 species, 429 MB). Same reads (996,424 pairs; two thirds from species in the reference, but mostly from genome regions outside the marker genes), 16 threads, warm page cache, scored by the benchmark's <code>score.py</code> at species level. Measured 2026-10-25.</p>
+  <div class="legend"><span><i class="sw" style="background:var(--flex)"></i>flexalign</span><span><i class="sw" style="background:var(--protal)"></i>protal v0.6.0</span><span><i class="sw" style="background:var(--mbw)"></i>minibwa 0.7</span></div>
+</header>
+
+<div class="tiles">
+  <div class="tile"><span class="k">Wall time</span><span class="v">3.6–3.8× faster</span><span class="s">1.21 s vs 4.40 s minibwa, 4.56 s protal</span></div>
+  <div class="tile"><span class="k">Peak memory</span><span class="v">1.51 GB</span><span class="s">minibwa 1.76 GB, protal 4.64 GB</span></div>
+  <div class="tile"><span class="k">Correct species</span><span class="v">60,788</span><span class="s">minibwa 60,692, protal 53,150</span></div>
+  <div class="tile"><span class="k">Precision, all calls</span><span class="v">84.9%</span><span class="s">protal 83.3%, minibwa 72.2%</span></div>
+</div>
+
+<section>
+  <h2>Cost</h2>
+  <div class="bars" id="bars"></div>
+  <p class="note">Index on disk counts the files each tool reads at run time. minibwa's index excludes the FASTA; flexalign's includes its own copy of the reference sequences.</p>
+</section>
+
+<section>
+  <h2>Accuracy</h2>
+  <div class="wrap"><table>
+    <thead><tr><th>Measure</th><th class="r">flexalign</th><th class="r">protal</th><th class="r">minibwa</th></tr></thead>
+    <tbody>
+      <tr><td>Mates with a primary alignment</td><td class="r">71,630</td><td class="r">63,792</td><td class="r">84,101</td></tr>
+      <tr><td>Correct species (sensitivity, of 1,992,848 mates)</td><td class="r win">60,788 (3.05%)</td><td class="r">53,150 (2.67%)</td><td class="r">60,692 (3.05%)</td></tr>
+      <tr><td>Wrong species</td><td class="r">10,842</td><td class="r win">10,642</td><td class="r">23,409</td></tr>
+      <tr><td>Precision (correct ÷ mapped)</td><td class="r win">84.9%</td><td class="r">83.3%</td><td class="r">72.2%</td></tr>
+      <tr><td>Correct in flexalign only / in the other only</td><td class="r">–</td><td class="r">8,842 / 1,204</td><td class="r">1,748 / 1,652</td></tr>
+      <tr><td>Wrong in both flexalign and the other</td><td class="r">–</td><td class="r">7,604</td><td class="r">10,363</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Precision and recall as the MAPQ threshold slides</h3>
+  <div class="legend"><span><i class="sw" style="background:var(--flex)"></i>flexalign main@204aac9</span><span><i class="sw" style="background:var(--flexold)"></i>flexalign 55dca8f (before the precision fix)</span><span><i class="sw" style="background:var(--protal)"></i>protal</span><span><i class="sw" style="background:var(--mbw)"></i>minibwa</span></div>
+  <figure>
+    <svg id="curve" viewBox="0 0 760 360" width="100%" role="img" aria-label="Precision-recall curves over MAPQ thresholds"></svg>
+  </figure>
+  <p class="note">Each point keeps only the alignments with MAPQ at or above a threshold, from 0 (everything, the right end of each curve) up to each tool's maximum (the left end); labels mark some thresholds. Recall is correct mates ÷ all 1,992,848 mates; precision is correct ÷ kept. Up and to the right is better. Hover a point for its numbers. MAPQ scales differ (flexalign tops out at 58, minibwa at 60, protal at 112), so compare curves, not equal threshold values.</p>
+  <div class="wrap"><table>
+    <thead><tr><th>Recall</th><th class="r">flexalign</th><th class="r">flexalign 55dca8f</th><th class="r">protal</th><th class="r">minibwa</th></tr></thead>
+    <tbody id="atrecall"></tbody>
+  </table></div>
+  <p class="note">Precision at a fixed recall: the highest precision each tool reaches while keeping at least that recall.</p>
+</section>
+
+<section>
+  <h2>What the precision fix changed</h2>
+  <p>flexalign <code>204aac9</code> (now <code>main</code>) differs from <code>55dca8f</code> in two ways. <code>--min-ani</code> defaults to 0.95, the species boundary, instead of 0.85: most alignments between 85% and 95% identity were reads of species the reference lacks, placed on a relative's marker (wrong mates 15,823 → 10,842, correct 60,797 → 60,788). And a mate whose partner did not align to the same reference loses 25 MAPQ, staying at 1 or above: such mates were 63–83% right at MAPQ 20–39 against 93–96% for paired mates, so a MAPQ cutoff used to drop good pairs before bad lone mates. Speed is unchanged; bacteroides loses 248 of 1.95 M correct mates (−0.013 pts).</p>
+  <p class="note">The simulated reads come from the reference genomes themselves (correct mates average 0.27 edits). Reads from strains 95–97% away from the reference would lose some sensitivity at the 0.95 floor; this benchmark cannot measure how much.</p>
+</section>
+
+<section>
+  <h2>Setup</h2>
+  <ul>
+    <li><b>flexalign</b> ran with <code>--index-format hashed --index-mmap</code>; wall time includes the index load. Median of 5 runs.</li>
+    <li><b>protal</b> ran alignment only (<code>--no_profile --no_strains</code>), so its taxonomic profiling step is not part of the time. Index: <code>protal --build --reference reference.fna</code>, single-threaded as protal requires. Median of 3 runs.</li>
+    <li><b>minibwa</b> ran as the benchmark runs it, <code>minibwa map -x sr</code>; index <code>minibwa index -l -b 1g</code>. Median of 3 runs.</li>
+    <li>Truth labels every read with its source species. 1,319,106 of the 1,992,848 mates (66%) come from one of the reference's species, but most fall outside the marker genes, and the truth does not say which overlap a marker. So recall is measured against all mates, as <code>score.py</code> does, and its ceiling is well below 100%. A mate counts once, by its primary alignment.</li>
+    <li>protal's build reads the FASTA only from <code>--reference</code>; without it, it writes an all-zero index and reports no error. It also needs a <code>reference.map</code>, generated here with the same byte-offset rule as the full r226 database.</li>
+    <li>Machine: AMD Ryzen AI 9 HX 370, 24 threads, Linux 7.2.</li>
+  </ul>
+</section>
+</main>
+
+<script>
+const tools = [["flexalign", "var(--flex)"], ["protal", "var(--protal)"], ["minibwa", "var(--mbw)"]];
+const cost = [
+  ["Wall time", [1.21, 4.56, 4.40], v => v.toFixed(2) + " s"],
+  ["CPU time", [16.75, 52.2, 55.9], v => v.toFixed(1) + " s"],
+  ["Peak memory", [1.51, 4.64, 1.76], v => v.toFixed(2) + " GB"],
+  ["Index on disk", [1.41, 4.65, 0.96], v => v.toFixed(2) + " GB"],
+  ["Index build time", [37.9, 66.5, 297.3], v => v.toFixed(0) + " s"],
+  ["Index build memory", [5.17, 4.61, 4.38], v => v.toFixed(2) + " GB"],
+];
+const bars = document.getElementById("bars");
+for (const [name, vals, fmt] of cost) {
+  const max = Math.max(...vals);
+  bars.insertAdjacentHTML("beforeend", `<div class="metric"><h4>${name}</h4>` + tools.map(([t, col], i) =>
+    `<div class="b"><span>${t}</span><div class="bar" style="width:${vals[i] / max * 100}%;background:${col}"></div><span class="v">${fmt(vals[i])}</span></div>`).join("") + `</div>`);
+}
+
+// [MAPQ threshold, mates kept, correct], one row per threshold where the kept count changes.
+const N = 1992848;
+const series = [
+  ["flexalign 55dca8f", "var(--flexold)", [[0,76620,60797],[1,66443,59100],[2,66042,58894],[3,65487,58600],[4,65004,58330],[5,64390,58026],[6,63882,57737],[7,63382,57433],[8,62881,57141],[9,62387,56863],[10,61860,56565],[11,61334,56247],[12,60767,55874],[13,60261,55544],[14,59734,55216],[15,59198,54855],[16,58647,54466],[17,58055,54043],[18,57362,53502],[19,56593,52878],[20,55354,51801],[21,53902,50501],[22,52134,48894],[23,50411,47299],[24,48905,45942],[25,48025,45208],[26,47389,44693],[27,46863,44291],[28,46306,43856],[29,45817,43482],[30,45312,43084],[31,44773,42653],[32,44172,42199],[33,43635,41773],[34,43045,41307],[35,42502,40867],[36,42012,40477],[37,41514,40089],[38,41006,39655],[39,40451,39198],[40,39911,38759],[41,39361,38321],[42,38815,37853],[43,38199,37305],[44,37573,36749],[45,36850,36112],[46,36035,35368],[47,35158,34561],[48,34471,33943],[49,33782,33331],[50,32786,32400],[51,31688,31373],[52,30427,30184],[53,28085,27915],[54,22841,22742],[55,21472,21415],[56,19522,19504],[57,9362,9358],[58,54,54]], [], true],
+  ["minibwa", "var(--mbw)", [[0,84101,60692],[1,75522,59691],[2,73495,59524],[3,73226,59509],[4,72942,59480],[5,72555,59468],[6,71979,59427],[7,71631,59359],[8,71407,59329],[9,71022,59187],[10,70682,59139],[11,70332,59026],[12,70115,58978],[13,69823,58899],[14,69502,58831],[15,69025,58709],[16,68662,58587],[17,68408,58527],[18,67953,58351],[19,67289,58109],[20,66748,57849],[21,66094,57434],[22,65731,57300],[23,65086,56996],[24,64937,56974],[25,64768,56943],[26,64584,56903],[27,64300,56852],[28,64143,56811],[29,64025,56797],[30,63858,56774],[31,63524,56708],[32,63396,56686],[33,63208,56608],[34,62980,56565],[35,62844,56529],[36,62719,56508],[37,62583,56460],[38,62417,56413],[39,62250,56343],[40,62107,56305],[41,61909,56247],[42,61697,56116],[43,61473,56015],[44,61224,55880],[45,61085,55828],[46,60899,55747],[47,60528,55482],[48,60280,55326],[49,58635,54479],[50,58019,54121],[51,57133,53405],[52,56880,53310],[53,55719,52404],[54,55353,52222],[55,54380,51457],[56,54074,51290],[57,53747,51079],[58,53316,50749],[59,53100,50636],[60,52745,50371]], [0, 1, 30, 60], false],
+  ["protal", "var(--protal)", [[0,63792,53150],[1,57956,52148],[2,55528,50712],[3,53186,49494],[4,51654,48658],[5,50466,47870],[6,49478,47126],[7,48548,46398],[8,47750,45744],[9,47010,45130],[10,46368,44570],[11,45812,44068],[12,45338,43638],[13,44928,43258],[14,44394,42756],[15,43970,42348],[16,43680,42068],[17,43432,41830],[18,43180,41594],[19,43024,41454],[20,42862,41308],[21,42748,41198],[22,42626,41082],[23,42496,40962],[24,42402,40880],[25,42326,40816],[26,42266,40760],[27,42212,40712],[28,42198,40702],[29,42188,40694],[30,42182,40692],[31,42156,40686],[32,42148,40680],[33,42132,40668],[34,42116,40656],[35,42076,40630],[36,42048,40608],[37,42028,40592],[38,42014,40582],[39,41978,40554],[40,41954,40536],[41,41930,40518],[42,41908,40506],[43,41876,40482],[44,41854,40462],[45,41806,40430],[46,41786,40416],[47,41740,40384],[48,41690,40354],[49,41648,40344],[50,41572,40334],[51,41508,40312],[52,41422,40284],[53,41334,40256],[54,41238,40232],[55,41152,40216],[56,41054,40190],[57,40934,40140],[58,40806,40060],[59,40674,39960],[60,40502,39824],[61,40306,39662],[62,40050,39422],[63,39726,39114],[64,39174,38578],[65,38784,38194],[66,38416,37830],[67,37954,37374],[68,37462,36886],[69,37022,36448],[70,36574,36006],[71,36184,35622],[72,36128,35566],[73,36078,35518],[74,36026,35468],[75,35978,35420],[76,35926,35368],[77,35884,35328],[78,35844,35290],[79,35812,35258],[80,35782,35232],[81,35754,35204],[82,35732,35182],[83,35706,35156],[84,35696,35146],[85,35684,35134],[86,35670,35120],[87,35658,35110],[88,35650,35102],[89,35636,35088],[90,35620,35072],[91,35600,35052],[92,35594,35046],[93,35590,35042],[94,35584,35036],[95,35576,35028],[99,35574,35026],[100,35572,35024],[101,35570,35022],[102,35552,35012],[103,35536,35004],[104,35388,34866],[105,34856,34344],[106,34148,33650],[107,33408,32918],[108,32516,32114],[109,31394,31240],[110,30342,30310],[111,29254,29250],[112,15606,15606]], [0, 10, 60, 110], false],
+  ["flexalign", "var(--flex)", [[0,71630,60788],[1,62912,59092],[2,60314,57539],[3,59825,57231],[4,59436,56979],[5,58990,56713],[6,58528,56390],[7,57990,56002],[8,57553,55686],[9,57103,55368],[10,56607,55018],[11,56165,54682],[12,55636,54270],[13,55198,53906],[14,54750,53553],[15,54261,53144],[16,53720,52658],[17,53140,52162],[18,52434,51510],[19,51631,50782],[20,50351,49567],[21,48798,48076],[22,46933,46285],[23,45115,44503],[24,43567,43003],[25,42645,42144],[26,41883,41430],[27,41125,40725],[28,40043,39670],[29,38117,37783],[30,37321,37004],[31,36909,36611],[32,36539,36271],[33,36170,35926],[34,35784,35560],[35,35438,35224],[36,35108,34910],[37,34794,34618],[38,34436,34268],[39,34050,33900],[40,33688,33556],[41,33378,33262],[42,33014,32904],[43,32628,32520],[44,32214,32112],[45,31752,31664],[46,31246,31170],[47,30668,30598],[48,30276,30212],[49,29846,29790],[50,29104,29054],[51,28330,28290],[52,27488,27452],[53,25902,25868],[54,22276,22254],[55,21366,21352],[56,19488,19480],[57,9358,9356],[58,54,54]], [0, 1, 20, 30, 50], false],
+];
+const NS = "http://www.w3.org/2000/svg", svg = document.getElementById("curve");
+const el = (t, a, txt, parent = svg) => { const e = document.createElementNS(NS, t); for (const k in a) e.setAttribute(k, a[k]); if (txt != null) e.textContent = txt; parent.appendChild(e); return e; };
+const L = 58, R = 744, T = 14, B = 300, x0 = 0, x1 = 3.2, y0 = 70, y1 = 100;
+const x = v => L + (v - x0) / (x1 - x0) * (R - L), y = v => B - (v - y0) / (y1 - y0) * (B - T);
+for (let v = 70; v <= 100; v += 5) { el("line", { x1: L, x2: R, y1: y(v), y2: y(v), stroke: "var(--grid)" }); el("text", { x: L - 8, y: y(v) + 4, "text-anchor": "end" }, v + "%"); }
+for (let v = 0; v <= 3; v += 0.5) { el("line", { x1: x(v), x2: x(v), y1: T, y2: B, stroke: "var(--grid)" }); el("text", { x: x(v), y: B + 18, "text-anchor": "middle" }, v.toFixed(1) + "%"); }
+el("text", { x: (L + R) / 2, y: B + 40, "text-anchor": "middle" }, "recall (correct mates of all mates)");
+el("text", { x: 14, y: (T + B) / 2, "text-anchor": "middle", transform: `rotate(-90 14 ${(T + B) / 2})` }, "precision");
+const rec = c => c / N * 100, prec = (m, c) => c / m * 100;
+for (const [name, col, pts, marks, dashed] of series) {
+  el("polyline", { points: pts.map(([, m, c]) => `${x(rec(c))},${y(prec(m, c))}`).join(" "), fill: "none", stroke: col, "stroke-width": dashed ? 1.5 : 2, "stroke-dasharray": dashed ? "5 4" : "none", "stroke-linejoin": "round" });
+  for (const [q, m, c] of pts) {
+    const g = el("g", {});
+    el("circle", { cx: x(rec(c)), cy: y(prec(m, c)), r: marks.includes(q) ? 4 : dashed ? 1.5 : 2.2, fill: col }, null, g);
+    el("title", {}, `${name}, MAPQ ≥ ${q}: ${c.toLocaleString()} of ${m.toLocaleString()} correct, precision ${prec(m, c).toFixed(1)}%, recall ${rec(c).toFixed(2)}%`, g);
+    if (marks.includes(q)) {
+      const up = name === "protal";
+      el("text", { x: x(rec(c)) + (up ? -6 : 6), y: y(prec(m, c)) + (up ? -8 : 15), "text-anchor": up ? "end" : "start", style: `fill:${col}` }, "≥" + q);
+    }
+  }
+}
+const best = (pts, r) => Math.max(...pts.filter(([, , c]) => rec(c) >= r).map(([, m, c]) => prec(m, c)), -1);
+const order = [3, 0, 2, 1]; // table columns: flexalign, flexalign 55dca8f, protal, minibwa
+const tb = document.getElementById("atrecall");
+for (const r of [1.5, 2.0, 2.5, 2.7, 2.9, 3.0]) {
+  const v = order.map(i => best(series[i][2], r)), top = Math.max(...v);
+  tb.insertAdjacentHTML("beforeend", `<tr><td>≥ ${r.toFixed(1)}%</td>${v.map(x => x < 0 ? '<td class="r">not reached</td>' : `<td class="r${x === top ? " win" : ""}">${x.toFixed(1)}%</td>`).join("")}</tr>`);
+}
+</script>

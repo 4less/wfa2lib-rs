@@ -1,0 +1,133 @@
+<title>flexalign Lookup Benchmark</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;750&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column; two dataset panels of to-scale wall-time bars, then accuracy and the step log */
+:root {
+  --bg: #f6f8f7; --panel: #ffffff; --fg: #17201e; --muted: #5d6b67; --rule: #d9e1de;
+  --main: #c7b8a6; --base: #8fb8b0; --final: #0f7a6c; --mbw: #7b6fa8; --good: #0f7a6c; --bad: #b4492f;
+  --sans: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #111816; --panel: #18211f; --fg: #e4ece9; --muted: #98a8a3; --rule: #2b3734;
+  --main: #8d7c69; --base: #4f8a80; --final: #3cc2ad; --mbw: #a397d6; --good: #3cc2ad; --bad: #e57a5f; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #111816; --panel: #18211f; --fg: #e4ece9; --muted: #98a8a3; --rule: #2b3734;
+  --main: #8d7c69; --base: #4f8a80; --final: #3cc2ad; --mbw: #a397d6; --good: #3cc2ad; --bad: #e57a5f; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.6 var(--sans); }
+main { max-width: 880px; margin: 0 auto; padding-block: 32px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 36px; }
+h1, h2, h3 { text-wrap: balance; line-height: 1.2; margin: 0; }
+h1 { font-size: 1.9rem; font-weight: 750; }
+h2 { font-size: 1.2rem; font-weight: 750; }
+h3 { font-size: .95rem; font-weight: 750; }
+p { margin: 0; max-width: 70ch; }
+.eyebrow { font: 600 .72rem var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+header, section { display: grid; gap: 12px; }
+.sub, .note { color: var(--muted); }
+.note { font-size: .84rem; }
+code { font-family: var(--mono); font-size: .86em; }
+.panels { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 16px 18px; display: grid; gap: 10px; min-width: 0; }
+.bars { display: grid; gap: 8px; }
+.b { display: grid; grid-template-columns: 7.6rem minmax(0, 1fr) 3.4rem; gap: 10px; align-items: center; font-size: .84rem; }
+.b .lbl { color: var(--muted); }
+.b .bar { height: 14px; border-radius: 2px; }
+.b .v { font: 600 .8rem var(--mono); text-align: right; font-variant-numeric: tabular-nums; }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+th, td { padding: 7px 10px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+th { font: 600 .7rem var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+td.r, th.r { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.hl td { font-weight: 600; }
+.pill { font: 600 .7rem var(--mono); padding: 2px 7px; border-radius: 999px; border: 1px solid currentColor; white-space: nowrap; }
+.kept { color: var(--good); } .dropped { color: var(--muted); }
+ul { margin: 0; padding-left: 1.2rem; display: grid; gap: 6px; }
+</style>
+
+<main>
+<header>
+  <div class="eyebrow">flexalign · index lookups · 16 threads</div>
+  <h1>Index lookups, checked on reads that should all map</h1>
+  <p class="sub">Two datasets that pull in opposite directions. In <b>bacteroides</b>, every read comes from the 249 reference genomes (1,991,540 reads). In <b>protal-mini</b>, 95% of pairs map nowhere. Contenders: flexalign <code>main@7ea91cf</code> (original), the <code>speed</code> branch with wfa2lib-rs (<code>f0831c4</code>, base), this work (<code>index-lookup@85b4350</code>, tag <code>perf/v4-index-lookup</code>), and minibwa 0.7-r421. <b>Update 2026-10-25:</b> the later milestones <code>perf/v5-lookup2</code> (cab17fa), <code>perf/v6-syncmer</code> (8ade5a8) and <code>perf/v8-single-end</code> (97b81cc, now <code>main</code>; its paired-end code is v7's anchor work) are added below; details on the Index Lookup Round 2 page.</p>
+</header>
+
+<section>
+  <h2>Wall time (median of 5 runs, minibwa 3)</h2>
+  <p class="note">v4 to v8 were re-measured on 2026-10-25; the other bars are from the original round.</p>
+  <div class="panels" id="panels"></div>
+  <p class="note">All runs share one page-cache state, with the indexes in 2 MB folios, and the index is warmed before each run. With 4 KB folios, before I collapsed the cache, the same change measured 0.92 → 0.82 s (−11%) on bacteroides and 1.51 → 1.46 s (−3%) on protal-mini.</p>
+</section>
+
+<section>
+  <h2>Sensitivity and precision did not move</h2>
+  <p>Base, this work and v5 to v8 emit the same SAM records on both datasets (same hash of all records), so every accuracy figure is identical.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Dataset</th><th>Contender</th><th class="r">Mapped</th><th class="r">Correct (of all)</th><th class="r">Wrong</th><th class="r">Precision</th><th class="r">Peak RSS</th></tr></thead>
+    <tbody>
+      <tr><td>bacteroides</td><td>main 7ea91cf</td><td class="r">99.895%</td><td class="r">97.851%</td><td class="r">40,703</td><td class="r">97.95%</td><td class="r">4.09 GB</td></tr>
+      <tr><td></td><td>base</td><td class="r">99.958%</td><td class="r">97.984%</td><td class="r">39,311</td><td class="r">98.03%</td><td class="r">3.60 GB</td></tr>
+      <tr class="hl"><td></td><td>this work</td><td class="r">99.958%</td><td class="r">97.984%</td><td class="r">39,311</td><td class="r">98.03%</td><td class="r">3.59 GB</td></tr>
+      <tr class="hl"><td></td><td>v5 to v8</td><td class="r">99.958%</td><td class="r">97.984%</td><td class="r">39,311</td><td class="r">98.03%</td><td class="r">3.55 GB</td></tr>
+      <tr><td></td><td>minibwa</td><td class="r">100.000%</td><td class="r">97.995%</td><td class="r">39,938</td><td class="r">97.99%</td><td class="r">2.98 GB</td></tr>
+      <tr><td>protal-mini</td><td>main 7ea91cf</td><td class="r">3.845%</td><td class="r">60,797</td><td class="r">15,824</td><td class="r">79.3%</td><td class="r">2.01 GB</td></tr>
+      <tr><td></td><td>base</td><td class="r">3.845%</td><td class="r">60,797</td><td class="r">15,823</td><td class="r">79.3%</td><td class="r">1.52 GB</td></tr>
+      <tr class="hl"><td></td><td>this work</td><td class="r">3.845%</td><td class="r">60,797</td><td class="r">15,823</td><td class="r">79.3%</td><td class="r">1.52 GB</td></tr>
+      <tr class="hl"><td></td><td>v5 to v8</td><td class="r">3.845%</td><td class="r">60,797</td><td class="r">15,823</td><td class="r">79.3%</td><td class="r">1.52 GB</td></tr>
+      <tr><td></td><td>minibwa</td><td class="r">4.220%</td><td class="r">60,692</td><td class="r">23,409</td><td class="r">72.2%</td><td class="r">1.74 GB</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">Correct means the right contig within 100 bp (bacteroides) or the right species (protal-mini), counted over every read mate in the truth. Precision is correct ÷ mapped.</p>
+</section>
+
+<section>
+  <h2>What was tried</h2>
+  <p>Each step was measured on both datasets against the step before it and kept only if it was faster with identical output.</p>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Step</th><th class="r">bacteroides</th><th class="r">protal-mini</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td>Base (speed + wfa2lib-rs)</td><td class="r">0.92 s</td><td class="r">1.51 s</td><td></td></tr>
+      <tr><td>Fetch each mate's key lines right after its k-mers are extracted, so the second mate's extraction hides the first's misses</td><td class="r">0.88 s</td><td class="r">1.48 s</td><td><span class="pill kept">kept</span></td></tr>
+      <tr><td>Fast hit: exact flank cells by 32-bit equality instead of popcount distances; branch-free <code>resolve_flex</code> threshold</td><td class="r">0.82 s</td><td class="r">1.46 s</td><td><span class="pill kept">kept</span></td></tr>
+      <tr><td>Value prefetch depth 0 / 1 / 2 / 4 (default 8)</td><td class="r">1.08–0.89 s</td><td class="r">1.63–1.52 s</td><td><span class="pill dropped">no gain</span></td></tr>
+      <tr><td><code>+popcnt,+bmi1,+bmi2,+lzcnt</code> in the release profile</td><td class="r">0.84 s</td><td class="r">1.45 s</td><td><span class="pill dropped">noise, reverted</span></td></tr>
+      <tr><td><code>madvise(MADV_HUGEPAGE)</code> on the index mapping from flexalign</td><td class="r">0.77 s</td><td class="r">1.44 s</td><td><span class="pill dropped">no gain</span></td></tr>
+      <tr><td>Skip repeated keys in the fast path's second round</td><td colspan="2" class="r">5% of pairs</td><td><span class="pill dropped">not worth it</span></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<section>
+  <h2>What I found along the way</h2>
+  <ul>
+    <li><b>Page-table walks, not DRAM, held up the prefetches.</b> With <code>--index-mmap</code>, the index sits in the page cache in 4 KB pages. Every random value prefetch then needs a page walk, and 12% of <code>lookup</code> stalled on the prefetch instruction. Once the index's page cache was rebuilt into 2 MB folios with <code>MADV_COLLAPSE</code>, that stall fell to 4.6%. Both builds got faster: bacteroides 0.82 → 0.76 s, protal-mini 1.46 → 1.43 s. Collapsing takes 0.4–1.2 s once per index and lasts until the cache is evicted.</li>
+    <li><b>Most of a lookup is now its own work.</b> A warm repeat of every lookup adds 1.0 s of CPU to protal-mini, out of about 3 s spent in <code>lookup</code>. A one-pair lookahead across the worker loop could hide most of the remaining misses. It needs an owned copy of the next pair, because bioreader lends records only for the length of the callback.</li>
+    <li><b>The build has no <code>popcnt</code>.</b> <code>count_ones</code> compiles to a bit-twiddling sequence under the current target features. It doesn't cost measurable time today; the fast path no longer counts bits at all.</li>
+  </ul>
+</section>
+
+<section>
+  <h2>Run details</h2>
+  <ul class="note">
+    <li>Machine: AMD Ryzen AI 9 HX 370, 24 threads, Linux 7.2. Builds use nightly Rust, fat LTO and AVX2. minibwa runs <code>map -x sr</code>.</li>
+    <li>Tests: 93 pass. The only failure is <code>test_offset_similarities</code>, which also fails on <code>main</code>.</li>
+    <li>flexmap, bioreader and kmerrs are unchanged. The change lives in flexalign: <code>range_extractor.rs</code>, <code>seed_extractor.rs</code>, <code>modular_workflow.rs</code>, and a <code>prefetch_keys</code> hook on the database trait.</li>
+  </ul>
+</section>
+</main>
+
+<script>
+const data = {
+  "bacteroides · all reads should map": [["main 7ea91cf", 2.63, "--main"], ["base", 0.80, "--base"], ["v4 (this work)", 0.78, "--base"], ["v5 lookup2", 0.74, "--base"], ["v6 syncmer", 0.66, "--base"], ["v8 anchors", 0.68, "--final"], ["minibwa", 4.13, "--mbw"]],
+  "protal-mini · 95% off-target": [["main 7ea91cf", 2.85, "--main"], ["base", 1.44, "--base"], ["v4 (this work)", 1.43, "--base"], ["v5 lookup2", 1.39, "--base"], ["v6 syncmer", 1.32, "--base"], ["v8 anchors", 1.23, "--final"], ["minibwa", 4.28, "--mbw"]],
+};
+const max = 4.5, root = document.getElementById("panels");
+for (const [title, rows] of Object.entries(data)) {
+  const bars = rows.map(([l, v, c]) => `<div class="b"><span class="lbl">${l}</span><div class="bar" style="width:${v / max * 100}%;background:var(${c})"></div><span class="v">${v.toFixed(2)} s</span></div>`).join("");
+  const mb = rows[rows.length - 1][1], fin = rows[rows.length - 2][1];
+  root.insertAdjacentHTML("beforeend", `<div class="panel"><h3>${title}</h3><div class="bars">${bars}</div><p class="note">v8 runs ${(mb / fin).toFixed(1)}× faster than minibwa and ${(rows[0][1] / fin).toFixed(1)}× faster than main 7ea91cf.</p></div>`);
+}
+</script>

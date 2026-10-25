@@ -1,0 +1,178 @@
+<title>flexalign Time Budget</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Public+Sans:wght@400;600;750&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column; a paired-bar ledger of CPU seconds per pipeline stage is the centrepiece */
+:root {
+  --bg: #f6f8f7; --panel: #ffffff; --fg: #17201e; --muted: #5d6b67; --rule: #d9e1de;
+  --old: #b9a58f; --new: #8fb8b0; --now: #0f7a6c; --good: #0f7a6c; --bad: #b4492f;
+  --sans: "Public Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #111816; --panel: #18211f; --fg: #e4ece9; --muted: #98a8a3; --rule: #2b3734;
+  --old: #8d7c69; --new: #4f8a80; --now: #3cc2ad; --good: #3cc2ad; --bad: #e57a5f; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #111816; --panel: #18211f; --fg: #e4ece9; --muted: #98a8a3; --rule: #2b3734;
+  --old: #8d7c69; --new: #4f8a80; --now: #3cc2ad; --good: #3cc2ad; --bad: #e57a5f; color-scheme: dark }
+body { background: var(--bg); color: var(--fg); font: 15px/1.6 var(--sans); }
+main { max-width: 860px; margin: 0 auto; padding-block: 32px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 36px; }
+h1, h2 { text-wrap: balance; line-height: 1.2; margin: 0; }
+h1 { font-size: 1.9rem; font-weight: 750; }
+h2 { font-size: 1.2rem; font-weight: 750; }
+p { margin: 0; max-width: 68ch; }
+.eyebrow { font: 600 .72rem var(--mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+header { display: grid; gap: 10px; }
+.sub { color: var(--muted); }
+code, .num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+code { font-size: .86em; }
+section { display: grid; gap: 14px; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+.kpi { background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 14px 16px; display: grid; gap: 2px; }
+.kpi .v { font: 600 1.55rem var(--mono); }
+.kpi .v b { color: var(--good); font-weight: 600; }
+.kpi .l { font-size: .82rem; color: var(--muted); }
+.legend { display: flex; gap: 18px; flex-wrap: wrap; font-size: .82rem; color: var(--muted); }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; }
+.ledger { display: grid; gap: 14px; background: var(--panel); border: 1px solid var(--rule); border-radius: 6px; padding: 18px; }
+.row { display: grid; grid-template-columns: minmax(0, 13rem) minmax(0, 1fr) 5.2rem; gap: 4px 14px; align-items: center; }
+.row .name { font-weight: 600; font-size: .9rem; grid-row: span 3; }
+.bar { height: 13px; border-radius: 2px; min-width: 2px; }
+.bar.o { background: var(--old); } .bar.n { background: var(--new); } .bar.w { background: var(--now); }
+.row .val { font: .8rem var(--mono); color: var(--muted); text-align: right; white-space: nowrap; }
+.row .delta { grid-column: 3; font: 600 .8rem var(--mono); text-align: right; }
+.up { color: var(--good); } .down { color: var(--bad); }
+.axis { display: grid; grid-template-columns: minmax(0, 13rem) minmax(0, 1fr) 5.2rem; gap: 14px; font: .72rem var(--mono); color: var(--muted); }
+.axis div:nth-child(2) { display: flex; justify-content: space-between; border-top: 1px solid var(--rule); padding-top: 4px; }
+@media (max-width: 560px) {
+  .row, .axis { grid-template-columns: minmax(0, 1fr) 4.6rem; }
+  .row .name { grid-row: auto; grid-column: 1 / -1; }
+  .row .delta { display: none; }
+  .axis div:first-child { display: none; }
+}
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: .88rem; }
+th, td { padding: 7px 10px; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+th { font: 600 .72rem var(--mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+td.r, th.r { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+ol.ideas { margin: 0; padding-left: 1.3rem; display: grid; gap: 14px; }
+ol.ideas li { padding-left: 4px; }
+ol.ideas b { display: block; }
+.gain { font: 600 .75rem var(--mono); color: var(--good); margin-left: 6px; }
+.note { font-size: .84rem; color: var(--muted); }
+ul { margin: 0; padding-left: 1.2rem; display: grid; gap: 6px; }
+</style>
+
+<main>
+<header>
+  <div class="eyebrow">protal-mini · sample_1 · 996,424 read pairs</div>
+  <h1>Where flexalign spends its time, before and after</h1>
+  <p class="sub">The <b>original</b> build is flexalign <code>main@7ea91cf</code>, aligning with the C WFA2-lib. The <b>speed</b> build is the <code>speed</code> branch (<code>5042afa</code>) merged with <code>main@3644c36</code>, so it aligns with wfa2lib-rs. <b>Now</b> is <code>main@97b81cc</code> (tag <code>perf/v8-single-end</code>), after the two index-lookup rounds, the branchless syncmer pass and the anchor-pairing rework. All runs use the same hashed index and the same reads.</p>
+</header>
+
+<section class="kpis" aria-label="Headline numbers">
+  <div class="kpi"><span class="v">3.06→1.47→1.23 s <b>2.5×</b></span><span class="l">Wall time, 16 threads</span></div>
+  <div class="kpi"><span class="v">23.8→17.7→14.1 s <b>1.7×</b></span><span class="l">CPU time, 1 thread</span></div>
+  <div class="kpi"><span class="v">9.2→14.1→13.9</span><span class="l">Cores kept busy out of 16</span></div>
+  <div class="kpi"><span class="v">2.01→1.52→1.52 GB</span><span class="l">Peak RSS, 16 threads</span></div>
+</section>
+
+<section>
+  <h2>CPU seconds per pipeline stage (1 thread)</h2>
+  <p>Each stage is measured as its share of sampled cycles (<code>perf</code>, 1999 Hz) times the run's user time. Bars use one scale.</p>
+  <div class="legend"><span><i style="background:var(--old)"></i>original 23.8 s</span><span><i style="background:var(--new)"></i>speed 17.7 s</span><span><i style="background:var(--now)"></i>now 14.1 s</span></div>
+  <p class="note">The delta next to each bar is against the bar above it. The "now" profile was bucketed into the same stages by symbol name; boundaries shift a little where LTO inlines across stages. 1-thread seconds swing by ±15% on this laptop as its boost clock changes, so the "now" total is v6's measured 15.5 s scaled by user cycles (48.5 G → 44.2 G, −9%).</p>
+  <div class="ledger" id="ledger"></div>
+</section>
+
+<section>
+  <h2>Since the speed build (17.7 → 14.1 s)</h2>
+  <ul>
+    <li><b>Anchor building and sorting: 4.1 → 2.8 s.</b> Anchors and anchor pairs are written straight into their Vec slots; built on the stack and copied, their wide loads stalled on store forwarding. Seed groups of the two mates are merged in one pass, and the pair sort no longer allocates or swaps.</li>
+    <li><b>Index lookup + seed emission: 5.6 → 4.0 s.</b> flexalign reads flexmap's hashed key table itself (8 entries a line in one AVX2 compare), the early per-mate key fetch now actually runs, and flank distances are computed 8 cells at a time.</li>
+    <li><b>Syncmer and k-mer extraction: 2.5 → 1.5 s.</b> The second pass no longer branches on the strand or on whether a k-mer is selected; both branches mispredicted often.</li>
+    <li><b>Index lookup is the largest stage again</b> (4.0 s, 29%), then anchor building (2.8 s) and extension (2.7 s).</li>
+  </ul>
+</section>
+
+<section>
+  <h2>What improved most</h2>
+  <ul>
+    <li><b>Anchor extension and verification: 5.3 → 2.6 s (2.0×).</b> This is the biggest single saving. Fewer anchors reach it, 17.1 → 10.1 per read, because the anchor gate is now on. <code>fix_anchor</code> fell from 10.7% of cycles to 0.6%.</li>
+    <li><b>Syncmer and k-mer extraction: 4.7 → 2.5 s (1.8×).</b> It now uses a sliding-window minimum, AVX2 s-mer passes and k-mers rolled in registers.</li>
+    <li><b>Anchor building and sorting: 6.0 → 4.1 s (1.5×).</b> Glidesort is gone. Short lists now use insertion sort, and anchor pairs use a permutation sort.</li>
+    <li><b>Parallelism.</b> This is why the wall-time gain (2.1×) beats the CPU gain (1.4×). Each gzip mate file now inflates on its own thread, so workers no longer wait on input. Busy cores rose from 9 to 14 of 16.</li>
+    <li><b>Timers and glue: 0.8 → 0.2 s.</b> The per-record <code>clock_gettime</code> calls are gone.</li>
+  </ul>
+  <p class="note">The switch from C WFA2-lib to wfa2lib-rs is not visible here. Gapped alignment takes 0.5% of CPU in both builds (about 0.1 s). Most attempts end early at the ANI abort: 2.0 dropped attempts per read against 0.07 successful ones.</p>
+</section>
+
+<section>
+  <h2>Where there is still room</h2>
+  <ol class="ideas">
+    <li><b>Reject off-target pairs before full seeding.<span class="gain">largest potential</span></b>
+      95.4% of pairs (950,941 of 996,424) produce no record, yet each one runs the whole pipeline: syncmers, lookups, seeds, anchors and an alignment attempt. A cheap presence test could stop most of them after a few lookups. For example, look up a sparse subset of syncmers and stop early when none hit. The fast-hit probe aims at the opposite case, placing pairs quickly, and it switched itself off here (it placed 66 of the first 2048 pairs). This matters most for marker-gene databases like protal, where most reads are off-target.</li>
+    <li><b>Make fewer anchor candidates.<span class="gain">~0.5–1 s</span></b>
+      Anchor building is down to 2.8 s (20%) after the in-place rework. Seeds that cannot pass the gate could still be pruned before pairing, instead of building pairs and then gating them; each anchor also carries its own heap-allocated seed list.</li>
+    <li><b>Index lookups: done for now.<span class="gain">tried</span></b>
+      Down from 5.6 to 4.0 s. Batching keys across pairs, a one-pair look-ahead and inline values in the key table were all measured and gave nothing; the remaining misses are on keys with many values.</li>
+    <li><b>Cut allocator traffic.<span class="gain">~0.5–1 s</span></b>
+      <code>malloc</code>/<code>free</code> cost 1.2 s (7%), up from 1.05 s. Trying mimalloc or reusing per-worker buffers is cheap.</li>
+    <li><b>Watch the input threads as thread counts grow.<span class="gain">matters above 16 threads</span></b>
+      gzip inflate is 1.4 s of CPU spread over two dedicated threads. That is not the limit at 16 threads, but it will cap wall time somewhere around 2–3× more workers. libdeflate, or uncompressed or BGZF input, would raise that cap.</li>
+  </ol>
+  <p class="note">Not worth pursuing: the aligner itself (0.5%).</p>
+</section>
+
+<section>
+  <h2>Run details</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Measure</th><th class="r">original</th><th class="r">speed</th><th class="r">now</th></tr></thead>
+    <tbody>
+      <tr><td>Wall, 16 threads</td><td class="r">2.99 / 3.13 s</td><td class="r">1.48 / 1.46 s</td><td class="r">1.23 s (median of 5)</td></tr>
+      <tr><td>User CPU, 16 threads</td><td class="r">28.0 s</td><td class="r">20.7 s</td><td class="r">17.0 s</td></tr>
+      <tr><td>Process-reads phase, 16 threads</td><td class="r">2.91 s</td><td class="r">1.31 s</td><td class="r">–</td></tr>
+      <tr><td>Index load</td><td class="r">0.21 s</td><td class="r">0.14 s (mmap)</td><td class="r">0.15 s (mmap; 0.12 s of it reference names)</td></tr>
+      <tr><td>Wall / user, 1 thread</td><td class="r">24.0 / 23.8 s</td><td class="r">16.8 / 17.7 s</td><td class="r">– / 14.1 s (cycle-scaled)</td></tr>
+      <tr><td>Peak RSS, 1 thread</td><td class="r">1.49 GB</td><td class="r">1.47 GB</td><td class="r">1.47 GB</td></tr>
+      <tr><td>Anchors per read</td><td class="r">17.07</td><td class="r">10.08</td><td class="r">–</td></tr>
+      <tr><td>SAM records</td><td class="r">76,621</td><td class="r">76,620</td><td class="r">same records as v4 to v7 (hash)</td></tr>
+    </tbody>
+  </table></div>
+  <ul class="note">
+    <li>Both builds were made with <code>cargo +nightly build --release</code>, fat LTO and AVX2, plus frame pointers and line tables for profiling. Machine: 24 cores, index in the page cache.</li>
+    <li>Stage boundaries are approximate. Fat LTO inlines across stages. In the original build, the inlined <code>align_from_seeds</code> body (5.4%) is counted under anchor building, where its source lines point.</li>
+    <li>Accuracy was not scored here. The record counts differ by one because the speed branch changes behaviour, for example the anchor gate.</li>
+  </ul>
+</section>
+</main>
+
+<script>
+const stages = [
+  ["Anchor extension & verification", 5.32, 2.62, 2.71],
+  ["Syncmer / k-mer extraction", 4.66, 2.53, 1.43],
+  ["Anchor building & sorting", 5.99, 4.08, 2.83],
+  ["Index lookup + seed emission", 4.61, 5.56, 4.05],
+  ["FASTQ input (gzip, parse)", 1.24, 1.43, 1.46],
+  ["Memory allocation", 1.05, 1.22, 0.99],
+  ["Timers, glue, other", 0.76, 0.17, 0.60],
+  ["WFA alignment", 0.12, 0.09, 0.03],
+];
+const max = 6.5, el = document.getElementById("ledger");
+const delta = (a, b) => { const d = a - b; return `<span class="${d >= 0 ? "up" : "down"}">${d >= 0 ? "−" : "+"}${Math.abs(d).toFixed(1)} s</span>`; };
+for (const [name, o, n, w] of stages) {
+  el.insertAdjacentHTML("beforeend", `<div class="row">
+    <div class="name">${name}</div>
+    <div class="bar o" style="width:${o / max * 100}%" title="original ${o.toFixed(2)} s"></div>
+    <div class="val">${o.toFixed(2)} s</div>
+    <div class="bar n" style="width:${n / max * 100}%" title="speed ${n.toFixed(2)} s"></div>
+    <div class="val">${n.toFixed(2)} s ${delta(o, n)}</div>
+    <div class="bar w" style="width:${w / max * 100}%" title="now ${w.toFixed(2)} s"></div>
+    <div class="val">${w.toFixed(2)} s ${delta(n, w)}</div>
+  </div>`);
+}
+el.insertAdjacentHTML("beforeend", `<div class="axis"><div></div><div><span>0</span><span>2 s</span><span>4 s</span><span>6 s</span></div><div></div></div>`);
+</script>
